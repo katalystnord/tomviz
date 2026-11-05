@@ -1,0 +1,162 @@
+"""Tests for the cone-beam operators: flat/dark correction, intensity to
+line integrals, and cone-beam FDK, driven the way tomviz runs them."""
+
+import numpy as np
+import pytest
+
+from utils import load_operator_class, load_operator_module
+
+from tomviz_pipeline.dataset import LegacyDataset as Dataset
+
+from tomviz.projectors import ConeGeometry, VolumeGeometry
+from tomviz.projectors.phantom import SHEPP_LOGAN_3D, EllipsoidPhantom
+
+SOD, SDD, PITCH = 200.0, 400.0, 0.8
+N_U, N_V = 64, 56
+ANGLES = np.arange(0, 360, 2.0)
+
+
+def to_tomviz(stack):
+    """(n, v, u) frames -> tomviz tilt series (v, u, n), Fortran order."""
+    return np.asfortranarray(np.moveaxis(stack, 0, 2).astype(np.float32))
+
+
+def make_dataset(array, angles=None):
+    ds = Dataset({'scalars': array})
+    ds.spacing = [1.0, 1.0, 1.0]
+    if angles is not None:
+        ds.tilt_angles = np.asarray(angles, dtype=np.float64)
+    return ds
+
+
+@pytest.fixture(scope='module')
+def phantom():
+    # Shepp-Logan is almost mirror-symmetric, so add a blob off every axis
+    # to make a mirrored or transposed reconstruction clearly wrong.
+    marker = [0.6, 0.15, 0.15, 0.15, 0.45, 0.35, 0.3, 0.0]
+    return EllipsoidPhantom(np.vstack([SHEPP_LOGAN_3D, marker]), radius=9.0)
+
+
+@pytest.fixture(scope='module')
+def geometry():
+    return ConeGeometry.circular(ANGLES, SOD, SDD, PITCH, PITCH, N_U, N_V)
+
+
+@pytest.fixture(scope='module')
+def line_integrals(phantom, geometry):
+    return phantom.project(geometry)
+
+
+def run_fdk(dataset, **kw):
+    operator = load_operator_class(load_operator_module('Recon_ConeBeam_FDK'))
+    args = dict(sod=SOD, sdd=SDD, pixel_size=PITCH, backend='cpu')
+    args.update(kw)
+    return operator.transform(dataset, **args)
+
+
+def reference_in_tomviz_order(phantom, shape_zyx, voxel):
+    ref = phantom.voxelize(VolumeGeometry(shape_zyx, voxel), supersample=2)
+    return ref.transpose(0, 2, 1)
+
+
+def test_flat_dark_operator(line_integrals):
+    rng = np.random.default_rng(3)
+    gain = rng.uniform(900, 1100, (N_V, N_U)).astype(np.float32)
+    dark = np.full((N_V, N_U), 100.0, dtype=np.float32)
+    raw = gain * np.exp(-line_integrals) + dark
+    flats = np.stack([gain + dark] * 4)
+
+    ds = make_dataset(to_tomviz(raw), ANGLES)
+    flat_ds = make_dataset(to_tomviz(flats))
+    dark_ds = make_dataset(dark[:, :, None].copy(order='F'))
+    module = load_operator_module('FlatDarkCorrection')
+    module.transform(ds, flat=flat_ds, dark=dark_ds)
+    assert np.allclose(ds.active_scalars, to_tomviz(line_integrals),
+                       atol=1e-3)
+    assert np.allclose(ds.tilt_angles, ANGLES)
+
+
+def test_flat_dark_operator_rejects_wrong_size(line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    bad = make_dataset(np.ones((N_V + 1, N_U, 1), dtype=np.float32,
+                               order='F'))
+    module = load_operator_module('FlatDarkCorrection')
+    with pytest.raises(RuntimeError):
+        module.transform(ds, flat=bad, dark=bad)
+
+
+@pytest.mark.parametrize('i0', [1000.0, 0.0])
+def test_intensity_to_line_integrals(line_integrals, i0):
+    intensity = 1000.0 * np.exp(-line_integrals) + 20.0
+    # Fixed or estimated I0 (each projection has air at its edges).
+    ds = make_dataset(to_tomviz(intensity), ANGLES)
+    module = load_operator_module('IntensityToLineIntegrals')
+    module.transform(ds, i0=i0 + 20.0 if i0 else 0.0, dark_level=20.0,
+                     air_percentile=99.9)
+    assert np.allclose(ds.active_scalars, to_tomviz(line_integrals),
+                       atol=1e-3)
+
+
+def test_fdk_operator_circular(phantom, line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    result = run_fdk(ds, volume_size_xy=40, volume_size_axial=36,
+                     voxel_size=0.5)
+    recon = result['reconstruction']
+    vol = recon.active_scalars
+    assert vol.shape == (36, 40, 40)
+    assert vol.flags.f_contiguous
+    assert list(recon.spacing) == pytest.approx([0.5, 0.5, 0.5])
+    ref = reference_in_tomviz_order(phantom, (36, 40, 40), 0.5)
+    err = np.sqrt(np.mean((vol - ref) ** 2))
+    assert err < 0.045
+    # Orientation: the marker must be where it belongs, not at any of
+    # its mirror images. World (x, y, z) is tomviz (y, z, x).
+    mx, my, mz = 0.45 * 9.0, 0.35 * 9.0, 0.3 * 9.0
+
+    def at(wx, wy, wz):
+        i = [int(round(c / 0.5 + (n - 1) / 2))
+             for c, n in zip((wz, wx, wy), vol.shape)]
+        return vol[i[0] - 1:i[0] + 2, i[1] - 1:i[1] + 2,
+                   i[2] - 1:i[2] + 2].mean()
+
+    here = at(mx, my, mz)
+    assert here > 0.5
+    for sx, sy, sz in [(-1, 1, 1), (1, -1, 1), (1, 1, -1)]:
+        assert at(sx * mx, sy * my, sz * mz) < here - 0.4
+    assert at(my, mx, mz) < here - 0.4
+
+
+def test_fdk_operator_default_volume(line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    vol = run_fdk(ds)['reconstruction'].active_scalars
+    assert vol.shape == (N_V, N_U, N_U)
+
+
+def test_fdk_operator_geometry_file(tmp_path, phantom, geometry,
+                                    line_integrals):
+    vecs = np.concatenate([geometry.source, geometry.det_center,
+                           geometry.det_u, geometry.det_v], axis=1)
+    path = tmp_path / 'scan.geom'
+    np.savetxt(path, vecs)
+    ds = make_dataset(to_tomviz(line_integrals))  # no angles needed
+    vol = run_fdk(ds, geometry_source='file', geometry_file=str(path),
+                  volume_size_xy=40, volume_size_axial=36,
+                  voxel_size=0.5)['reconstruction'].active_scalars
+    ref = reference_in_tomviz_order(phantom, (36, 40, 40), 0.5)
+    assert np.sqrt(np.mean((vol - ref) ** 2)) < 0.045
+
+    np.savetxt(path, vecs[:-1])
+    with pytest.raises(RuntimeError, match='rows'):
+        run_fdk(ds, geometry_source='file', geometry_file=str(path))
+
+
+def test_fdk_operator_needs_angles(line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals))
+    with pytest.raises(RuntimeError, match='angle'):
+        run_fdk(ds)
+
+
+def test_fdk_operator_bad_geometry(line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    with pytest.raises(RuntimeError):
+        run_fdk(ds, sod=500.0, sdd=400.0)

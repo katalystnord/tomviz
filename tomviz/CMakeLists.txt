@@ -581,6 +581,9 @@ set(python_files
   Recon_DFT.py
   Recon_DFT_constraint.py
   Recon_WBP.py
+  Recon_ConeBeam_FDK.py
+  FlatDarkCorrection.py
+  IntensityToLineIntegrals.py
   Recon_ART.py
   Recon_SIRT.py
   Recon_TV_minimization.py
@@ -696,6 +699,9 @@ set(json_files
   ShiftRotationCenter_tomopy.json
   Recon_SIRT.json
   Recon_WBP.json
+  Recon_ConeBeam_FDK.json
+  FlatDarkCorrection.json
+  IntensityToLineIntegrals.json
   Shift3D.json
   ShiftTiltSeriesRandomly.json
   SwapAxes.json

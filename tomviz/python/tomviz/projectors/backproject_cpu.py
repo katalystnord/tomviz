@@ -9,8 +9,9 @@ Work is split into slabs of z slices that run on a thread pool (numpy
 releases the GIL in the array arithmetic, so threads do run in parallel).
 """
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import os
+import threading
 
 import numpy as np
 
@@ -45,14 +46,14 @@ def _bilinear(img, u, v):
     return out
 
 
-def _backproject_slab(filtered, P, x, y, z, should_stop):
+def _backproject_slab(filtered, P, x, y, z, stop):
     """Backproject every projection into the voxels z (nzs,) x y x x."""
     acc = np.zeros((len(z), len(y), len(x)), dtype=np.float32)
     X = x[None, None, :]
     Y = y[None, :, None]
     Z = z[:, None, None]
     for k in range(len(P)):
-        if should_stop():
+        if stop.is_set():
             return None
         m = P[k]
         den = m[2, 0] * X + m[2, 1] * Y + m[2, 2] * Z + m[2, 3]
@@ -84,22 +85,27 @@ def backproject(filtered, geom, vol_geom, threads=None, slab=None,
         slab = max(1, min(slab, -(-nz // threads)))
     starts = list(range(0, nz, slab))
     vol = np.zeros(vol_geom.shape, dtype=np.float32)
+    # progress() and should_stop() are only ever called from this thread;
+    # workers see cancellation through the event.
+    stop = threading.Event()
     done = 0
     with ThreadPoolExecutor(max_workers=threads) as pool:
-        futures = {
+        pending = {
             pool.submit(_backproject_slab, filtered, P, x, y,
-                        z[s:s + slab], should_stop): s
+                        z[s:s + slab], stop): s
             for s in starts
         }
-        for fut in futures:
-            s = futures[fut]
-            res = fut.result()
-            if res is None:
+        while pending:
+            finished, _ = wait(pending, timeout=0.2,
+                               return_when=FIRST_COMPLETED)
+            if should_stop():
+                stop.set()
                 return None
-            vol[s:s + slab] = res
-            done += len(res)
-            if progress is not None:
-                progress(done, nz)
-    if should_stop():
-        return None
+            for fut in finished:
+                s = pending.pop(fut)
+                res = fut.result()
+                vol[s:s + slab] = res
+                done += len(res)
+                if progress is not None:
+                    progress(done, nz)
     return vol

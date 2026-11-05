@@ -1,0 +1,157 @@
+{
+  "name": "ReconstructConeBeamFDK",
+  "label": "Cone-Beam FDK",
+  "description": "Reconstruct cone-beam X-ray CT projections (lab and industrial scanners with a point source and a flat-panel detector) with the Feldkamp-Davis-Kress (FDK) algorithm.\n\nThe input must be line integrals (use Flat/Dark Field Correction or Intensity to Line Integrals first). Each projection is an image in the x-y plane, with x parallel to the rotation axis; the projection angles are the tilt angles, in degrees. Scans of 360 degrees use full-scan weights; shorter scans (at least 180 degrees plus the fan angle) use Parker short-scan weights.\n\nThe geometry is either a circular orbit described below, or a measured per-projection geometry loaded from a text file with one row of 12 numbers per projection (source, detector centre, detector u step, detector v step; the ASTRA cone_vec layout).\n\nThe output volume has x along the rotation axis and voxel spacing in the same units as the distances.",
+  "children": [
+    {
+      "name": "reconstruction",
+      "label": "Reconstruction",
+      "type": "reconstruction"
+    }
+  ],
+  "parameters": [
+    {
+      "name": "geometry_source",
+      "label": "Geometry",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {"Circular Orbit": "circular"},
+        {"Vectors From File": "file"}
+      ]
+    },
+    {
+      "name": "sod",
+      "label": "Source to Rotation Axis Distance",
+      "description": "Distance from the X-ray source to the rotation axis (SOD), in mm or any length unit used consistently.",
+      "type": "double",
+      "default": 100.0,
+      "minimum": 1e-6,
+      "maximum": 1e9,
+      "precision": 4,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "sdd",
+      "label": "Source to Detector Distance",
+      "description": "Distance from the X-ray source to the detector (SDD).",
+      "type": "double",
+      "default": 200.0,
+      "minimum": 1e-6,
+      "maximum": 1e9,
+      "precision": 4,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "pixel_size",
+      "label": "Detector Pixel Size",
+      "description": "Detector pixel pitch (as binned), in the same unit as the distances.",
+      "type": "double",
+      "default": 0.1,
+      "minimum": 1e-9,
+      "maximum": 1e6,
+      "precision": 6,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "offset_u",
+      "label": "Horizontal Detector Offset (pixels)",
+      "description": "Where the central ray, through the rotation axis and perpendicular to the detector, hits the detector, in pixels from the detector centre across the rotation axis (along y). Use it to correct an off-centre rotation axis.",
+      "type": "double",
+      "default": 0.0,
+      "precision": 3,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "offset_v",
+      "label": "Vertical Detector Offset (pixels)",
+      "description": "Where the central ray hits the detector, in pixels from the detector centre along the rotation axis (along x).",
+      "type": "double",
+      "default": 0.0,
+      "precision": 3,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "clockwise",
+      "label": "Reverse Rotation Direction",
+      "description": "Turn this on if the reconstruction comes out mirrored.",
+      "type": "bool",
+      "default": false,
+      "visible_if": "geometry_source == 'circular'"
+    },
+    {
+      "name": "geometry_file",
+      "label": "Geometry Vectors File",
+      "description": "Text file with one row of 12 numbers per projection: source position, detector centre, detector u step (across the rotation axis) and v step (along it), as in ASTRA's cone_vec geometry.",
+      "type": "file",
+      "filter": "Geometry files (*.geom *.txt *.csv *.npy)",
+      "visible_if": "geometry_source == 'file'"
+    },
+    {
+      "name": "filter_name",
+      "label": "Filter",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {"Ram-Lak (ramp)": "ram-lak"},
+        {"Shepp-Logan": "shepp-logan"},
+        {"Cosine": "cosine"},
+        {"Hamming": "hamming"},
+        {"Hann": "hann"}
+      ]
+    },
+    {
+      "name": "short_scan",
+      "label": "Short-Scan Weights",
+      "description": "Parker weights for scans shorter than 360 degrees. Auto uses them when the scan is shorter than a full circle.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {"Auto": "auto"},
+        {"On": "on"},
+        {"Off": "off"}
+      ]
+    },
+    {
+      "name": "volume_size_xy",
+      "label": "Volume Size Across the Axis (voxels)",
+      "description": "Voxels in y and z. 0 covers the field of view.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 16384
+    },
+    {
+      "name": "volume_size_axial",
+      "label": "Volume Size Along the Axis (voxels)",
+      "description": "Voxels in x. 0 covers the field of view.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 16384
+    },
+    {
+      "name": "voxel_size",
+      "label": "Voxel Size",
+      "description": "0 uses the detector pixel size divided by the magnification.",
+      "type": "double",
+      "default": 0.0,
+      "minimum": 0.0,
+      "precision": 6
+    },
+    {
+      "name": "backend",
+      "label": "Compute On",
+      "description": "Auto uses a GPU through WebGPU (any vendor) when available and falls back to the CPU.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {"Auto": "auto"},
+        {"CPU": "cpu"},
+        {"GPU": "gpu"}
+      ]
+    }
+  ],
+  "inputType": "TiltSeries",
+  "outputType": "Volume"
+}

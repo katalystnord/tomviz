@@ -1,0 +1,39 @@
+{
+  "name": "FlatDarkCorrection",
+  "label": "Flat/Dark Field Correction",
+  "description": "Correct raw X-ray projections with flat-field (open beam) and dark-field (beam off) images: T = (I - dark) / (flat - dark). Each of the flat and dark inputs may be a single image or a stack of images, which are averaged. With 'Convert to line integrals' on, the result is -ln(T), which is what reconstruction expects. Pixels where flat <= dark are treated as dead and come out as no attenuation.",
+  "externalCompatible": false,
+  "parameters": [
+    {
+      "name": "flat",
+      "label": "Flat Field",
+      "description": "Open-beam image(s) with the same detector size as the projections.",
+      "type": "dataset"
+    },
+    {
+      "name": "dark",
+      "label": "Dark Field",
+      "description": "Beam-off image(s) with the same detector size as the projections.",
+      "type": "dataset"
+    },
+    {
+      "name": "line_integrals",
+      "label": "Convert to Line Integrals (-log)",
+      "description": "Output -ln(transmission) instead of transmission.",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "name": "min_transmission",
+      "label": "Minimum Transmission",
+      "description": "Transmission is clipped to at least this before the log, so photon-starved pixels give large finite values instead of infinity.",
+      "type": "double",
+      "default": 1e-6,
+      "minimum": 1e-12,
+      "maximum": 1.0,
+      "precision": 8
+    }
+  ],
+  "inputType": "TiltSeries",
+  "outputType": "TiltSeries"
+}

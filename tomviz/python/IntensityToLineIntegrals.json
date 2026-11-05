@@ -1,0 +1,46 @@
+{
+  "name": "IntensityToLineIntegrals",
+  "label": "Intensity to Line Integrals (-log)",
+  "description": "Convert X-ray intensities to line integrals, -ln((I - dark) / (I0 - dark)), using constant open-beam (I0) and dark levels. Use this when there are no flat/dark images, for example when the scanner exports images that are already flat-field corrected. With I0 = 0, it is estimated per projection from the brightest pixels (the air around the sample), which needs some air in every projection.",
+  "parameters": [
+    {
+      "name": "i0",
+      "label": "Open-Beam Intensity (I0)",
+      "description": "Intensity with no sample in the beam. 0 estimates it from each projection.",
+      "type": "double",
+      "default": 0.0,
+      "minimum": 0.0,
+      "precision": 4
+    },
+    {
+      "name": "air_percentile",
+      "label": "Air Percentile",
+      "description": "When I0 is estimated, the percentile of each projection taken as open beam.",
+      "type": "double",
+      "default": 99.5,
+      "minimum": 50.0,
+      "maximum": 100.0,
+      "visible_if": "i0 == 0"
+    },
+    {
+      "name": "dark_level",
+      "label": "Dark Level",
+      "description": "Detector offset with the beam off.",
+      "type": "double",
+      "default": 0.0,
+      "precision": 4
+    },
+    {
+      "name": "min_transmission",
+      "label": "Minimum Transmission",
+      "description": "Transmission is clipped to at least this before the log.",
+      "type": "double",
+      "default": 1e-6,
+      "minimum": 1e-12,
+      "maximum": 1.0,
+      "precision": 8
+    }
+  ],
+  "inputType": "TiltSeries",
+  "outputType": "TiltSeries"
+}

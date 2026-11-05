@@ -735,6 +735,11 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("2D Gradient Magnitude");
   QAction* ctfCorrectAction =
     preprocessingMenu->addAction("CTF Correction");
+  preprocessingMenu->addSeparator();
+  QAction* flatDarkCorrectionAction =
+    preprocessingMenu->addAction("Flat/Dark Field Correction (X-ray)");
+  QAction* intensityToLineIntegralsAction =
+    preprocessingMenu->addAction("Intensity to Line Integrals (-log)");
 
   // === Alignment submenu ===
   QMenu* alignmentMenu = m_ui->menuTomography->addMenu("Alignment");
@@ -774,6 +779,9 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     reconstructionMenu->addAction("TV Minimization Method");
   QAction* reconTomoPyGridRecAction =
     reconstructionMenu->addAction("TomoPy Reconstruction");
+  reconstructionMenu->addSeparator();
+  QAction* reconConeBeamFDKAction =
+    reconstructionMenu->addAction("Cone-Beam FDK (X-ray CT)");
 
   // === Simulation submenu ===
   QMenu* simulationMenu =
@@ -824,6 +832,14 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
   new AddPythonTransformReaction(ctfCorrectAction, "CTF Correction",
                                  readInPythonScript("ctf_correct"),
                                  readInJSONDescription("ctf_correct"));
+  new AddPythonTransformReaction(flatDarkCorrectionAction,
+                                 "Flat/Dark Field Correction",
+                                 readInPythonScript("FlatDarkCorrection"),
+                                 readInJSONDescription("FlatDarkCorrection"));
+  new AddPythonTransformReaction(
+    intensityToLineIntegralsAction, "Intensity to Line Integrals",
+    readInPythonScript("IntensityToLineIntegrals"),
+    readInJSONDescription("IntensityToLineIntegrals"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),
@@ -879,6 +895,11 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     reconTomoPyGridRecAction, "Reconstruct (TomoPy)",
     readInPythonScript("Recon_tomopy"),
     readInJSONDescription("Recon_tomopy"));
+
+  new AddPythonTransformReaction(reconConeBeamFDKAction,
+                                 "Reconstruct (Cone-Beam FDK)",
+                                 readInPythonScript("Recon_ConeBeam_FDK"),
+                                 readInJSONDescription("Recon_ConeBeam_FDK"));
 
   new ReconstructionReaction(reconWBP_CAction);
 
