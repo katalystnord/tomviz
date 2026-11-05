@@ -4,14 +4,16 @@
 ###############################################################################
 """Choosing where backprojection runs.
 
-'cpu' always works. 'gpu' uses WebGPU through wgpu-py (Vulkan, Metal or
-DX12, so any vendor) and raises if no usable adapter is found. 'auto' tries
-the GPU and falls back to the CPU, recording why.
+'cpu' is the numpy reference and always works. 'gpu' uses WebGPU through
+wgpu-py (Vulkan, Metal or DX12, so any vendor) and raises if no usable
+adapter is found. That includes software adapters such as Mesa's lavapipe,
+which run on the CPU but are much faster than numpy. 'auto' tries WebGPU
+and falls back to numpy, recording why.
 
 Environment variables (optional):
     TOMVIZ_WGPU_ADAPTER: pick an adapter whose name contains this text
         (case-insensitive), or 'cpu' / 'discrete' / 'integrated' for the
-        adapter type. Default: the high-performance adapter.
+        adapter type. Default: discrete, then integrated, then software.
     TOMVIZ_CONEBEAM_THREADS: CPU threads for the CPU backend.
 """
 

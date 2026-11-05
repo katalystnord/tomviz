@@ -85,32 +85,46 @@ def main():
     ap.add_argument('--backend', default='cpu')
     ap.add_argument('--threads', type=int, default=None)
     ap.add_argument('--png', help='write a comparison image here')
+    ap.add_argument('--save', help='save the reconstruction (.npy) here')
     args = ap.parse_args()
     threads = args.threads or 8
 
     t0 = time.perf_counter()
     projs, flat, dark, vecs = load(args.root, args.tube, args.bin,
                                    args.step, threads)
-    line = flat_dark_correct(projs, flat, dark)
+    line = flat_dark_correct(projs, flat, dark, out=projs)
     del projs
     g = ConeGeometry.from_astra_vectors(vecs, line.shape[2], line.shape[1])
     n = 501 // args.bin
     vg = VolumeGeometry((n, n, n), 0.1 * args.bin)
     t1 = time.perf_counter()
+    det_shape = line.shape[1:]
     rec = fdk(line, g, vg, backend=args.backend, threads=args.threads,
-              log=print)
+              log=print, overwrite=True)
+    del line
     t2 = time.perf_counter()
     rec = np.flip(rec, 2)  # reference x axis convention, see docstring
     ref = load_reference(args.root, args.tube, args.bin)
     slope, offset = np.polyfit(ref.ravel(), rec.ravel(), 1)
     corr = np.corrcoef(ref.ravel(), rec.ravel())[0, 1]
     rmse = np.sqrt(np.mean((rec - ref) ** 2))
-    print(f'{g.n_angles} projections of {line.shape[1]}x{line.shape[2]}, '
+    print(f'{g.n_angles} projections of {det_shape[0]}x{det_shape[1]}, '
           f'volume {vg.shape} at {vg.voxel_size[0]} mm')
     print(f'load + correct {t1 - t0:.1f} s, FDK {t2 - t1:.1f} s')
     print(f'vs reference: correlation {corr:.4f}, slope {slope:.4f}, '
           f'offset {offset:.5f}, RMSE {rmse:.5f} '
           f'(reference std {ref.std():.5f})')
+    # Resolution-insensitive comparisons: the slope after smoothing both
+    # volumes the same way, and the mean density inside the walnut.
+    from scipy.ndimage import gaussian_filter
+    rs, ms = gaussian_filter(ref, 2.0), gaussian_filter(rec, 2.0)
+    smooth_slope = np.polyfit(rs.ravel(), ms.ravel(), 1)[0]
+    inside = rs > 0.5 * np.percentile(rs, 99)
+    print(f'smoothed (sigma 2 voxels) slope {smooth_slope:.4f}, mean '
+          f'inside walnut: ours/reference '
+          f'{rec[inside].mean() / ref[inside].mean():.4f}')
+    if args.save:
+        np.save(args.save, rec)
 
     if args.png:
         from PIL import Image

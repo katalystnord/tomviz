@@ -892,6 +892,7 @@ set(tomviz_python_projectors_modules
   backproject_cpu.py
   geometry.py
   phantom.py
+  webgpu.py
 )
 
 file(MAKE_DIRECTORY "${tomviz_python_binary_dir}/tomviz/projectors")

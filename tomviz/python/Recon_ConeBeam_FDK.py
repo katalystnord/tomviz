@@ -88,7 +88,8 @@ class ReconConeBeamFDKOperator(tomviz.operators.CancelableOperator):
         short = {'auto': 'auto', 'on': True, 'off': False}[short_scan]
         vol = fdk(projections, geom, vol_geom, filter_name=filter_name,
                   short_scan=short, backend=backend, progress=progress,
-                  should_stop=lambda: self.canceled, log=log)
+                  should_stop=lambda: self.canceled, log=log,
+                  overwrite=True)
         if vol is None:
             return None
 

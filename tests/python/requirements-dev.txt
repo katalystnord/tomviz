@@ -3,6 +3,8 @@ pytest
 diskcache
 h5py
 requests
+# Optional GPU reconstruction through WebGPU; its tests skip without it
+wgpu-py
 # Below are the ones needed for the acquisition installation
 bottle
 Pillow

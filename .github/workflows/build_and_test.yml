@@ -88,6 +88,20 @@ jobs:
         conda install -y --override-channels -c conda-forge --file tomviz/.github/workflows/pyxrf_requirements.txt
         pip install --no-build-isolation --no-deps -U tomviz/tomviz/python/tomviz/pyxrf/pyxrf-utils
 
+    - name: Install a software Vulkan driver (Linux)
+      # Mesa's lavapipe gives the runner a WebGPU adapter, so the GPU
+      # reconstruction code (WGSL shaders) is tested on every pull request
+      # without real GPU hardware.
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+    - name: Report WebGPU adapters
+      # Informational: which adapters each platform offers, and whether a
+      # trivial compute shader runs on them.
+      continue-on-error: true
+      run: python tomviz/dev/wgpu_spike.py
+
     - name: Run Tests
       env:
           # Make sure the Qt tests run offscreen

@@ -218,6 +218,14 @@ def test_fdk_progress_and_cancel(phantom, vol_geom):
                should_stop=lambda: True) is None
 
 
+def test_fdk_overwrite_gives_same_result(phantom, vol_geom):
+    g = circular(np.arange(0, 360, 6.0))
+    proj = phantom.project(g)
+    normal = fdk(proj.copy(), g, vol_geom, threads=THREADS)
+    inplace = fdk(proj, g, vol_geom, threads=THREADS, overwrite=True)
+    assert np.array_equal(normal, inplace)
+
+
 def test_fdk_rejects_mismatched_projections(vol_geom):
     g = circular(np.arange(0, 360, 6.0))
     with pytest.raises(ValueError):
@@ -254,3 +262,64 @@ def test_flat_dark_correction_shape_checks():
         flat_dark_correct(np.ones((2, 3, 4)), flat=np.ones((3, 5)))
     with pytest.raises(ValueError):
         flat_dark_correct(np.ones((3, 4)))
+
+
+# -- WebGPU backend -------------------------------------------------------
+
+def _gpu_backend():
+    """The WebGPU backend, or skip the test if this machine has none."""
+    pytest.importorskip('wgpu')
+    from tomviz.projectors.backend import get_backend
+    try:
+        return get_backend('gpu')
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+
+@pytest.fixture
+def no_cached_backend():
+    from tomviz.projectors import webgpu
+    saved = webgpu._cached
+    webgpu._cached = None
+    yield
+    webgpu._cached = saved
+
+
+def test_gpu_matches_cpu(phantom):
+    from tomviz.projectors import backproject_cpu, webgpu
+    be = _gpu_backend()
+    g = circular(np.arange(0, 360, 3.0), offset_u=2.5, offset_v=-1.5)
+    vg = VolumeGeometry((20, 26, 30), 0.6)  # deliberately not cubic
+    filt, _ = filtering.preweight_and_filter(phantom.project(g), g)
+    ref = backproject_cpu.backproject(filt, g, vg, threads=THREADS)
+    got = be.backproject(filt, g, vg)
+    scale = np.abs(ref).max()
+    assert np.abs(got - ref).max() < 1e-4 * scale
+    # Many slabs and tiny batches exercise the streaming and row windows.
+    orig = webgpu.MAX_UPDATES_PER_DISPATCH
+    try:
+        webgpu.MAX_UPDATES_PER_DISPATCH = 1 << 12
+        got = be.backproject(filt, g, vg, slab=3)
+    finally:
+        webgpu.MAX_UPDATES_PER_DISPATCH = orig
+    assert np.abs(got - ref).max() < 1e-4 * scale
+
+
+def test_gpu_fdk_and_cancel(phantom, vol_geom, reference):
+    _gpu_backend()
+    g = circular(np.arange(0, 360, 1.5))
+    proj = phantom.project(g)
+    rec = fdk(proj, g, vol_geom, backend='gpu')
+    assert rmse(rec, reference) < 0.035
+    assert fdk(proj, g, vol_geom, backend='gpu',
+               should_stop=lambda: True) is None
+
+
+def test_auto_falls_back_to_cpu(monkeypatch, no_cached_backend):
+    from tomviz.projectors.backend import get_backend
+    monkeypatch.setenv('TOMVIZ_WGPU_ADAPTER', 'no-such-adapter')
+    be = get_backend('auto')
+    assert be.name == 'cpu'
+    assert 'GPU unavailable' in be.description
+    with pytest.raises(RuntimeError, match='GPU backend unavailable'):
+        get_backend('gpu')

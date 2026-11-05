@@ -35,6 +35,8 @@ setup(
                       'numpy', 'scipy'],
     extras_require={
         'itk': ['itk'],
-        'pyfftw': ['pyfftw']
+        'pyfftw': ['pyfftw'],
+        # GPU reconstruction on any vendor's GPU through WebGPU
+        'gpu': ['wgpu'],
     },
 )
