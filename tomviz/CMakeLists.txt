@@ -880,6 +880,35 @@ foreach(file ${tomviz_python_ptycho_modules})
     "${tomviz_python_binary_dir}/tomviz/ptycho/${file}")
 endforeach()
 
+set(tomviz_python_projectors_modules
+  __init__.py
+  backend.py
+  backproject_cpu.py
+  geometry.py
+  phantom.py
+)
+
+file(MAKE_DIRECTORY "${tomviz_python_binary_dir}/tomviz/projectors")
+foreach(file ${tomviz_python_projectors_modules})
+  execute_process(COMMAND ${CMAKE_COMMAND} -E ${script_cmd}
+    "${tomviz_SOURCE_DIR}/tomviz/python/tomviz/projectors/${file}"
+    "${tomviz_python_binary_dir}/tomviz/projectors/${file}")
+endforeach()
+
+set(tomviz_python_conebeam_modules
+  __init__.py
+  fdk.py
+  filtering.py
+  preprocess.py
+)
+
+file(MAKE_DIRECTORY "${tomviz_python_binary_dir}/tomviz/conebeam")
+foreach(file ${tomviz_python_conebeam_modules})
+  execute_process(COMMAND ${CMAKE_COMMAND} -E ${script_cmd}
+    "${tomviz_SOURCE_DIR}/tomviz/python/tomviz/conebeam/${file}"
+    "${tomviz_python_binary_dir}/tomviz/conebeam/${file}")
+endforeach()
+
 # Autodiscover python reader/writers added to tomviz/python/tomviz/io/formats
 file(GLOB tomviz_python_io_formats "${tomviz_SOURCE_DIR}/tomviz/python/tomviz/io/formats/*.py")
 file(MAKE_DIRECTORY "${tomviz_python_binary_dir}/tomviz/io/formats")
