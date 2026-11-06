@@ -589,6 +589,21 @@ void PipelineStripWidget::setLinkValidator(LinkValidator validator)
   m_linkValidator = std::move(validator);
 }
 
+namespace {
+
+// The expand toggle opens a node's output ports, or a group's members.
+// An empty group has nothing to open, so it gets no toggle.
+bool hasExpandToggle(Node* node)
+{
+  if (node->outputPorts().isEmpty()) {
+    return false;
+  }
+  auto* group = qobject_cast<SinkGroupNode*>(node);
+  return !group || !group->sinks().isEmpty();
+}
+
+} // namespace
+
 bool PipelineStripWidget::isExpanded(Node* node) const
 {
   return m_expandedNodes.contains(node);
@@ -1490,7 +1505,7 @@ void PipelineStripWidget::paintNodeCard(QPainter& painter,
   painter.drawLine(sepX, sepTop, sepX, sepBot);
 
   // Expand toggle for nodes with output ports
-  if (!outputs.isEmpty()) {
+  if (hasExpandToggle(node)) {
     bool expanded = m_expandedNodes.contains(node);
     QColor arrowColor = fg;
     painter.setBrush(Qt::NoBrush);
@@ -2926,14 +2941,14 @@ void PipelineStripWidget::mousePressEvent(QMouseEvent* event)
 
       // Expand toggle (rightmost area) or action button
       auto outputs = node->outputPorts();
-      if (!outputs.isEmpty()) {
+      if (hasExpandToggle(node)) {
         int toggleX = cardRect.right() - HeaderExpandWidth - HeaderRightPad;
         if (event->pos().x() >= toggleX &&
             event->pos().x() <= cardRect.right() - HeaderRightPad) {
           setExpanded(node, !isExpanded(node));
           return;
         }
-      } else if (!node->actionIcon().isNull()) {
+      } else if (outputs.isEmpty() && !node->actionIcon().isNull()) {
         QRect actRect = actionButtonRect(cardRect);
         if (actRect.contains(event->pos())) {
           node->triggerAction();
