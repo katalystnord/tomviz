@@ -76,6 +76,30 @@ def test_flat_dark_operator(line_integrals):
     assert np.allclose(ds.tilt_angles, ANGLES)
 
 
+@pytest.mark.parametrize('layout', ['single, count in the middle',
+                                    'stack, count in the middle',
+                                    'single, transposed'])
+def test_flat_dark_operator_any_image_axis(line_integrals, layout):
+    # A single image loaded from a file can arrive as (x, 1, y): seen in
+    # the application with an EMD flat field. Any axis order must work.
+    rng = np.random.default_rng(4)
+    gain = rng.uniform(900, 1100, (N_V, N_U)).astype(np.float32)
+    dark = np.full((N_V, N_U), 100.0, dtype=np.float32)
+    raw = gain * np.exp(-line_integrals) + dark
+    if layout == 'single, count in the middle':
+        flat = (gain + dark)[:, None, :]
+    elif layout == 'stack, count in the middle':
+        flat = np.stack([gain + dark] * 3, axis=1)
+    else:
+        flat = (gain + dark).T[:, :, None]
+    ds = make_dataset(to_tomviz(raw), ANGLES)
+    module = load_operator_module('FlatDarkCorrection')
+    module.transform(ds, flat=make_dataset(np.asfortranarray(flat)),
+                     dark=make_dataset(np.asfortranarray(dark[:, None, :])))
+    assert np.allclose(ds.active_scalars, to_tomviz(line_integrals),
+                       atol=1e-3)
+
+
 def test_flat_dark_operator_rejects_wrong_size(line_integrals):
     ds = make_dataset(to_tomviz(line_integrals), ANGLES)
     bad = make_dataset(np.ones((N_V + 1, N_U, 1), dtype=np.float32,
