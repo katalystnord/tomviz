@@ -319,12 +319,9 @@ class WgpuBackprojector:
             v_lo = np.clip(np.floor(vcorner.min(1)) - 1, 0, n_v).astype(int)
             v_hi = np.clip(np.ceil(vcorner.max(1)) + 2, 0, n_v).astype(int)
 
+            # WebGPU guarantees that new buffers are zero-filled.
             vol_buf = self._buffer(
-                size=nzs * plane * 4,
-                usage=wgpu.BufferUsage.COPY_SRC | wgpu.BufferUsage.COPY_DST)
-            vol_buf_zero = np.zeros(nzs * plane, dtype=np.float32)
-            self.device.queue.write_buffer(vol_buf, 0, vol_buf_zero)
-            del vol_buf_zero
+                size=nzs * plane * 4, usage=wgpu.BufferUsage.COPY_SRC)
 
             k = 0
             while k < n_angles:
@@ -509,23 +506,31 @@ class WgpuBackprojector:
 
 
 _cached = None
+_failure = None
 
 
 def make_backend():
     """Create the WebGPU backend once per process, or raise with a reason
-    if it cannot be used."""
-    global _cached
+    if it cannot be used. A failure is remembered too, so later runs fall
+    back at once instead of repeating device setup and the self-test."""
+    global _cached, _failure
     if _cached is not None:
         return _cached
+    if _failure is not None:
+        raise RuntimeError(_failure)
     try:
-        import wgpu
-    except ImportError:
-        raise RuntimeError('the wgpu package is not installed '
-                           '(pip install wgpu)')
-    _restrict_backends()
-    from .backend import Backend
-    bp = WgpuBackprojector(_choose_adapter(wgpu))
-    bp.self_test()
+        try:
+            import wgpu
+        except ImportError:
+            raise RuntimeError('the wgpu package is not installed '
+                               '(pip install wgpu)')
+        _restrict_backends()
+        from .backend import Backend
+        bp = WgpuBackprojector(_choose_adapter(wgpu))
+        bp.self_test()
+    except Exception as e:
+        _failure = str(e) or type(e).__name__
+        raise
     _cached = Backend('gpu', bp.description, bp.backproject,
                       bp.forward_project)
     return _cached

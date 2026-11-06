@@ -279,10 +279,10 @@ def _gpu_backend():
 @pytest.fixture
 def no_cached_backend():
     from tomviz.projectors import webgpu
-    saved = webgpu._cached
-    webgpu._cached = None
+    saved = webgpu._cached, webgpu._failure
+    webgpu._cached = webgpu._failure = None
     yield
-    webgpu._cached = saved
+    webgpu._cached, webgpu._failure = saved
 
 
 def test_gpu_matches_cpu(phantom):
@@ -323,6 +323,25 @@ def test_auto_falls_back_to_cpu(monkeypatch, no_cached_backend):
     assert 'GPU unavailable' in be.description
     with pytest.raises(RuntimeError, match='GPU backend unavailable'):
         get_backend('gpu')
+
+
+def test_auto_remembers_why_the_gpu_failed(monkeypatch, no_cached_backend):
+    # A failing adapter costs device setup and a self-test; pay it once.
+    pytest.importorskip('wgpu')
+    from tomviz.projectors import webgpu
+    from tomviz.projectors.backend import get_backend
+    calls = []
+
+    def broken(wgpu):
+        calls.append(1)
+        raise RuntimeError('broken adapter')
+
+    monkeypatch.setattr(webgpu, '_choose_adapter', broken)
+    for _ in range(3):
+        be = get_backend('auto')
+        assert be.name == 'cpu'
+        assert 'broken adapter' in be.description
+    assert len(calls) == 1
 
 
 def test_volume_behind_the_source_is_rejected():
