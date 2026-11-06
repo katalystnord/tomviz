@@ -218,6 +218,9 @@ QString ExternalNodeExecutor::writeShimTvh5(Node* target,
   }
 
   for (auto* input : target->inputPorts()) {
+    if (!input->link() && input->isOptional()) {
+      continue; // left out: the operator gets its default
+    }
     if (!input->link() || !input->hasData()) {
       qWarning() << "ExternalNodeExecutor: input port" << input->name()
                  << "has no data; cannot run externally.";

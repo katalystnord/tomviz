@@ -60,6 +60,9 @@ bool GatedEditorWidget::inputsReady() const
     return false;
   }
   for (auto* input : m_node->inputPorts()) {
+    if (!input->link() && input->isOptional()) {
+      continue;
+    }
     if (!input->link() || input->isStale() || !input->hasData()) {
       return false;
     }
