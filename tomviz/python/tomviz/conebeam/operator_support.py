@@ -64,8 +64,10 @@ def projections_from_tilt_series(tilt_series):
         raise RuntimeError('No scalars found!')
     if tilt_series.ndim != 3:
         raise RuntimeError('Expected a stack of projections')
-    return np.ascontiguousarray(np.moveaxis(tilt_series, 2, 0),
-                                dtype=np.float32)
+    # A copy even when moveaxis already gives a C-contiguous view (a single
+    # detector row does): the reconstruction filters this array in place.
+    return np.array(np.moveaxis(tilt_series, 2, 0), dtype=np.float32,
+                    order='C', copy=True)
 
 
 def set_volume(child, vol, vol_geom):

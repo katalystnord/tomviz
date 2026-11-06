@@ -184,3 +184,13 @@ def test_fdk_operator_bad_geometry(line_integrals):
     ds = make_dataset(to_tomviz(line_integrals), ANGLES)
     with pytest.raises(RuntimeError):
         run_fdk(ds, sod=500.0, sdd=400.0)
+
+
+def test_fdk_operator_leaves_single_row_input_alone(phantom):
+    # A single detector row moves into a C-contiguous view without a copy;
+    # FDK filters its working copy in place, so it must be a real copy.
+    g = ConeGeometry.circular(ANGLES, SOD, SDD, PITCH, PITCH, N_U, 1)
+    tilt = to_tomviz(phantom.project(g))
+    ds = make_dataset(tilt.copy(order='F'), ANGLES)
+    run_fdk(ds, volume_size_xy=40, volume_size_axial=1, voxel_size=0.5)
+    np.testing.assert_array_equal(ds.active_scalars, tilt)
