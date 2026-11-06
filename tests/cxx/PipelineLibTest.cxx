@@ -1355,6 +1355,36 @@ TEST_F(PipelineLibTest, WidgetExpandCollapse)
   EXPECT_FALSE(widget.isExpanded(source));
 }
 
+// An empty Visualizations group has nothing to expand, so a click on its
+// expand toggle does not expand it.
+TEST_F(PipelineLibTest, WidgetEmptySinkGroupDoesNotExpand)
+{
+  auto* group = new SinkGroupNode();
+  group->addPassthrough("data", PortType::ImageData);
+  pipeline->addNode(group);
+  auto* member = new CollectorSink();
+  pipeline->addNode(member);
+  pipeline->createLink(group->outputPort("data"), member->inputPort("in"));
+
+  // Sized before the pipeline is set: a hidden widget gets no resize
+  // event, so the layout is computed for this width only then
+  PipelineStripWidget widget;
+  widget.resize(250, 400);
+  widget.setPipeline(pipeline);
+
+  // The first card spans y = 4 to 35, and its expand toggle x = width - 25
+  // to width - 9 (the header constants in PipelineStripWidget.h)
+  const QPoint toggle(widget.width() - 17, 20);
+  QTest::mouseClick(&widget, Qt::LeftButton, Qt::NoModifier, toggle);
+  ASSERT_TRUE(widget.isExpanded(group));
+  widget.setExpanded(group, false);
+
+  pipeline->removeNode(member);
+  ASSERT_TRUE(group->sinks().isEmpty());
+  QTest::mouseClick(&widget, Qt::LeftButton, Qt::NoModifier, toggle);
+  EXPECT_FALSE(widget.isExpanded(group));
+}
+
 TEST_F(PipelineLibTest, WidgetSignalWiring)
 {
   PipelineStripWidget widget;

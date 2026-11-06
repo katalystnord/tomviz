@@ -45,6 +45,17 @@ static bool canHaveBreakpoint(Node* node)
          qobject_cast<TransformNode*>(node) != nullptr;
 }
 
+// The expand toggle opens a node's output ports, or a group's members.
+// An empty group has nothing to open, so it gets no toggle.
+static bool hasExpandToggle(Node* node)
+{
+  if (node->outputPorts().isEmpty()) {
+    return false;
+  }
+  auto* group = qobject_cast<SinkGroupNode*>(node);
+  return !group || !group->sinks().isEmpty();
+}
+
 // Invert an RGB color, preserving alpha. Used to make a selected link (and
 // its endpoint port outlines) read as clearly picked against its normal
 // port-type color.
@@ -1489,8 +1500,8 @@ void PipelineStripWidget::paintNodeCard(QPainter& painter,
   int sepBot = r.top() + headerHeight - 6;
   painter.drawLine(sepX, sepTop, sepX, sepBot);
 
-  // Expand toggle for nodes with output ports
-  if (!outputs.isEmpty()) {
+  // Expand toggle for nodes with something to expand
+  if (hasExpandToggle(node)) {
     bool expanded = m_expandedNodes.contains(node);
     QColor arrowColor = fg;
     painter.setBrush(Qt::NoBrush);
@@ -1512,7 +1523,7 @@ void PipelineStripWidget::paintNodeCard(QPainter& painter,
       painter.drawLine(QPointF(arrowCX + halfW, cy),
                        QPointF(arrowCX - halfW, cy + arrowSize));
     }
-  } else {
+  } else if (outputs.isEmpty()) {
     // Action button for nodes without outputs (e.g. visibility toggle)
     QIcon actIcon = node->actionIcon();
     if (!actIcon.isNull()) {
@@ -2926,14 +2937,14 @@ void PipelineStripWidget::mousePressEvent(QMouseEvent* event)
 
       // Expand toggle (rightmost area) or action button
       auto outputs = node->outputPorts();
-      if (!outputs.isEmpty()) {
+      if (hasExpandToggle(node)) {
         int toggleX = cardRect.right() - HeaderExpandWidth - HeaderRightPad;
         if (event->pos().x() >= toggleX &&
             event->pos().x() <= cardRect.right() - HeaderRightPad) {
           setExpanded(node, !isExpanded(node));
           return;
         }
-      } else if (!node->actionIcon().isNull()) {
+      } else if (outputs.isEmpty() && !node->actionIcon().isNull()) {
         QRect actRect = actionButtonRect(cardRect);
         if (actRect.contains(event->pos())) {
           node->triggerAction();
