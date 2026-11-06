@@ -2,7 +2,7 @@
 # This source file is part of the Tomviz project, https://tomviz.org/.
 # It is released under the 3-Clause BSD License, see "LICENSE".
 ###############################################################################
-"""Choosing where backprojection runs.
+"""Choosing where backprojection and forward projection run.
 
 'cpu' is the numpy reference and always works. 'gpu' uses WebGPU through
 wgpu-py (Vulkan, Metal or DX12, so any vendor) and raises if no usable
@@ -20,7 +20,7 @@ Environment variables (optional):
 from dataclasses import dataclass
 from typing import Callable
 
-from . import backproject_cpu
+from . import backproject_cpu, forward_cpu
 
 
 @dataclass
@@ -28,13 +28,15 @@ class Backend:
     name: str  # 'cpu' or 'gpu'
     description: str
     backproject: Callable
+    forward_project: Callable
 
 
 def cpu_backend(reason=None):
     desc = f'CPU, {backproject_cpu.default_threads()} threads'
     if reason:
         desc += f' ({reason})'
-    return Backend('cpu', desc, backproject_cpu.backproject)
+    return Backend('cpu', desc, backproject_cpu.backproject,
+                   forward_cpu.forward_project)
 
 
 def get_backend(kind='auto'):

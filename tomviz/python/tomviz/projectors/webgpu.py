@@ -2,7 +2,8 @@
 # This source file is part of the Tomviz project, https://tomviz.org/.
 # It is released under the 3-Clause BSD License, see "LICENSE".
 ###############################################################################
-"""Cone-beam backprojection on any GPU through WebGPU (wgpu-py).
+"""Backprojection and forward projection on any GPU through WebGPU
+(wgpu-py), for cone and parallel beams.
 
 WebGPU runs on Vulkan, Metal and DX12, so this works on NVIDIA, AMD, Intel
 and Apple GPUs alike, and on software adapters such as Mesa's lavapipe.
@@ -78,6 +79,114 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 """
 
+FORWARD_SHADER = """
+struct Params {
+    n_u: u32, n_v: u32, n_proj: u32, nx: u32,
+    ny: u32, nz: u32, z_first: i32, nzb: i32,
+    own0: i32, own1: i32, pad0: u32, pad1: u32,
+    sx: f32, sy: f32, sz: f32, pad2: f32,
+}
+
+@group(0) @binding(0) var<storage, read> vol: array<f32>;
+// Six rows per projection, in voxel index coordinates: ray origin o0, o_u,
+// o_v and direction d0, d_u, d_v; origin = o0 + iu o_u + iv o_v, etc.
+@group(0) @binding(1) var<storage, read> rays: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn voxel(ix: i32, iy: i32, iz: i32) -> f32 {
+    let lz = iz - params.z_first;
+    if (ix < 0 || iy < 0 || lz < 0 || ix >= i32(params.nx) ||
+        iy >= i32(params.ny) || lz >= params.nzb) {
+        return 0.0;
+    }
+    return vol[(u32(lz) * params.ny + u32(iy)) * params.nx + u32(ix)];
+}
+
+// Bilinear sample on plane p of axis a, at (qb, qc) on the other two axes
+// in increasing order.
+fn plane_sample(a: u32, p: i32, qb: f32, qc: f32) -> f32 {
+    let fb = floor(qb);
+    let fc = floor(qc);
+    let wb1 = qb - fb;
+    let wc1 = qc - fc;
+    let b0 = i32(fb);
+    let c0 = i32(fc);
+    var acc = 0.0;
+    for (var db = 0; db < 2; db++) {
+        let wb = select(1.0 - wb1, wb1, db == 1);
+        if (wb == 0.0) { continue; }
+        for (var dc = 0; dc < 2; dc++) {
+            let wc = select(1.0 - wc1, wc1, dc == 1);
+            if (wc == 0.0) { continue; }
+            let bi = b0 + db;
+            let ci = c0 + dc;
+            var v = 0.0;
+            if (a == 0u) { v = voxel(p, bi, ci); }
+            else if (a == 1u) { v = voxel(bi, p, ci); }
+            else { v = voxel(bi, ci, p); }
+            acc += v * wb * wc;
+        }
+    }
+    return acc;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.n_u || gid.y >= params.n_v ||
+        gid.z >= params.n_proj) {
+        return;
+    }
+    let fu = f32(gid.x);
+    let fv = f32(gid.y);
+    let r = 6u * gid.z;
+    let o = (rays[r] + fu * rays[r + 1u] + fv * rays[r + 2u]).xyz;
+    let d = (rays[r + 3u] + fu * rays[r + 4u] + fv * rays[r + 5u]).xyz;
+    let ad = abs(d);
+    // Dominant axis a, the other two axes b < c, and plane count.
+    var a = 0u;
+    var oa = o.x; var ob = o.y; var oc = o.z;
+    var da = d.x; var db = d.y; var dc = d.z;
+    var na = i32(params.nx);
+    if (ad.y > ad.x && ad.y >= ad.z) {
+        a = 1u; oa = o.y; ob = o.x; da = d.y; db = d.x; na = i32(params.ny);
+    } else if (ad.z > ad.x && ad.z > ad.y) {
+        a = 2u; oa = o.z; ob = o.x; oc = o.y; da = d.z; db = d.x; dc = d.y;
+        na = i32(params.nz);
+    }
+    var p_lo = 0;
+    var p_hi = na - 1;
+    if (a == 2u) {
+        p_lo = max(p_lo, params.own0);
+        p_hi = min(p_hi, params.own1 - 1);
+    } else {
+        // Only planes where the ray's z lies in this slab's own range.
+        let rz = dc / da;
+        if (abs(rz) > 1e-9) {
+            let pa = oa + (f32(params.own0) - oc) / rz;
+            let pb = oa + (f32(params.own1) - oc) / rz;
+            p_lo = max(p_lo, i32(floor(min(pa, pb))) - 1);
+            p_hi = min(p_hi, i32(ceil(max(pa, pb))) + 1);
+        }
+    }
+    var acc = 0.0;
+    for (var p = p_lo; p <= p_hi; p++) {
+        let t = (f32(p) - oa) / da;
+        let qb = ob + t * db;
+        let qc = oc + t * dc;
+        if (a != 2u) {
+            // Each sample belongs to the slab holding floor(z).
+            let kz = i32(floor(qc));
+            if (kz < params.own0 || kz >= params.own1) { continue; }
+        }
+        acc += plane_sample(a, p, qb, qc);
+    }
+    let scale = vec3<f32>(params.sx, params.sy, params.sz);
+    let step = length(d * scale) / abs(da);
+    out[(gid.z * params.n_v + gid.y) * params.n_u + gid.x] = acc * step;
+}
+"""
+
 # Rough number of voxel updates one dispatch may do, to keep each dispatch
 # well under the ~2 s watchdog of some drivers even on slow GPUs.
 MAX_UPDATES_PER_DISPATCH = 1 << 29
@@ -139,6 +248,9 @@ class WgpuBackprojector:
         self.max_groups = int(lim['max-compute-workgroups-per-dimension'])
         module = self.device.create_shader_module(code=SHADER)
         self.pipeline = self.device.create_compute_pipeline(
+            layout='auto', compute={'module': module, 'entry_point': 'main'})
+        module = self.device.create_shader_module(code=FORWARD_SHADER)
+        self.forward_pipeline = self.device.create_compute_pipeline(
             layout='auto', compute={'module': module, 'entry_point': 'main'})
         # Reading this tiny buffer back waits for all submitted work. (The
         # queue's on_submitted_work_done is broken in some wgpu-py
@@ -278,6 +390,97 @@ class WgpuBackprojector:
         mat_buf.destroy()
         par_buf.destroy()
 
+    def forward_project(self, volume, geom, vol_geom, threads=None,
+                        progress=None, should_stop=None, slab=None):
+        """Same as forward_cpu.forward_project, on the GPU. The volume
+        streams through in slabs of z slices (plus one slice of overlap
+        for interpolation); each sample is counted in exactly one slab."""
+        from .forward_cpu import index_space_rays
+        wgpu = self.wgpu
+        should_stop = should_stop or (lambda: False)
+        vol = np.ascontiguousarray(volume, dtype=np.float32)
+        if vol.shape != vol_geom.shape:
+            raise ValueError(f'Volume shape {vol.shape} does not match '
+                             f'{vol_geom.shape}')
+        nz, ny, nx = vol.shape
+        n, n_v, n_u = geom.n_angles, geom.n_v, geom.n_u
+        rays, scale = index_space_rays(geom, vol_geom)
+        rays = np.stack(rays, axis=1)  # (n, 6, 3)
+        rays = np.concatenate([rays, np.zeros((n, 6, 1))], axis=2)
+        rays = rays.astype(np.float32)
+
+        plane = ny * nx
+        if slab is None:
+            slab = max(1, self.max_binding // (4 * plane) - 1)
+        slab = min(slab, nz)
+        if (slab + 1) * plane * 4 > self.max_binding and slab > 1:
+            slab = max(1, self.max_binding // (4 * plane) - 1)
+        if 2 * plane * 4 > self.max_binding:
+            raise RuntimeError(
+                f'A single {ny}x{nx} slice is too large for this GPU '
+                f'({self.max_binding} bytes per buffer)')
+        planes = max(nx, ny, nz)
+        per_proj = n_u * n_v
+        batch = max(1, min(n, MAX_UPDATES_PER_DISPATCH //
+                           max(1, per_proj * planes),
+                           self.max_binding // (4 * per_proj),
+                           self.max_groups))
+        if per_proj * 4 > self.max_binding:
+            raise RuntimeError('A single projection is too large for this '
+                               'GPU')
+
+        out = np.zeros((n, n_v, n_u), dtype=np.float32)
+        slabs = list(range(0, nz, slab))
+        total = len(slabs) * n
+        done = 0
+        for s0 in slabs:
+            s1 = min(nz, s0 + slab)
+            b1 = min(nz, s1 + 1)
+            vol_buf = self._buffer(np.ascontiguousarray(vol[s0:b1]))
+            own0 = -1 if s0 == 0 else s0
+            for k0 in range(0, n, batch):
+                if should_stop():
+                    vol_buf.destroy()
+                    return None
+                k1 = min(n, k0 + batch)
+                params = np.zeros(16, dtype=np.uint32)
+                params[:6] = [n_u, n_v, k1 - k0, nx, ny, nz]
+                params[6:10] = np.array([s0, b1 - s0, own0, s1],
+                                        dtype=np.int32).view(np.uint32)
+                params[12:15] = np.array(scale, dtype=np.float32).view(
+                    np.uint32)
+                out_buf = self._buffer(
+                    size=(k1 - k0) * per_proj * 4,
+                    usage=wgpu.BufferUsage.COPY_SRC)
+                ray_buf = self._buffer(np.ascontiguousarray(rays[k0:k1]))
+                par_buf = self.device.create_buffer_with_data(
+                    data=params, usage=wgpu.BufferUsage.UNIFORM)
+                bind = self.device.create_bind_group(
+                    layout=self.forward_pipeline.get_bind_group_layout(0),
+                    entries=[
+                        {'binding': 0, 'resource': {'buffer': vol_buf}},
+                        {'binding': 1, 'resource': {'buffer': ray_buf}},
+                        {'binding': 2, 'resource': {'buffer': out_buf}},
+                        {'binding': 3, 'resource': {'buffer': par_buf}},
+                    ])
+                enc = self.device.create_command_encoder()
+                cp = enc.begin_compute_pass()
+                cp.set_pipeline(self.forward_pipeline)
+                cp.set_bind_group(0, bind)
+                cp.dispatch_workgroups(-(-n_u // 8), -(-n_v // 8), k1 - k0)
+                cp.end()
+                self.device.queue.submit([enc.finish()])
+                data = self.device.queue.read_buffer(out_buf)
+                out[k0:k1] += np.frombuffer(data, dtype=np.float32).reshape(
+                    k1 - k0, n_v, n_u)
+                for b in (out_buf, ray_buf, par_buf):
+                    b.destroy()
+                done += k1 - k0
+                if progress is not None:
+                    progress(done, total)
+            vol_buf.destroy()
+        return out
+
     def self_test(self):
         """Backproject a tiny problem and compare with the CPU path."""
         from . import backproject_cpu
@@ -292,6 +495,14 @@ class WgpuBackprojector:
         if not np.allclose(got, ref, rtol=1e-4, atol=1e-4 * abs(ref).max()):
             raise RuntimeError('GPU self-test gave wrong results '
                                f'(max error {abs(got - ref).max():.3g})')
+        from . import forward_cpu
+        vol = rng.random(vg.shape, dtype=np.float32)
+        ref = forward_cpu.forward_project(vol, g, vg, threads=1)
+        got = self.forward_project(vol, g, vg, slab=2)
+        if not np.allclose(got, ref, rtol=1e-4, atol=1e-4 * abs(ref).max()):
+            raise RuntimeError('GPU forward projection self-test gave wrong '
+                               f'results (max error '
+                               f'{abs(got - ref).max():.3g})')
 
 
 _cached = None
@@ -312,5 +523,6 @@ def make_backend():
     from .backend import Backend
     bp = WgpuBackprojector(_choose_adapter(wgpu))
     bp.self_test()
-    _cached = Backend('gpu', bp.description, bp.backproject)
+    _cached = Backend('gpu', bp.description, bp.backproject,
+                      bp.forward_project)
     return _cached

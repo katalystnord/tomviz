@@ -890,6 +890,7 @@ set(tomviz_python_projectors_modules
   __init__.py
   backend.py
   backproject_cpu.py
+  forward_cpu.py
   geometry.py
   phantom.py
   webgpu.py

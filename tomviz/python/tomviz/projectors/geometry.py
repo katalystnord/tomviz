@@ -272,6 +272,17 @@ class ConeGeometry:
                 iu[None, :, None] * self.det_u[k] +
                 iv[:, None, None] * self.det_v[k])
 
+    def ray_parameters(self):
+        """Rays as origin(iu, iv) + t * direction(iu, iv), both linear in
+        the pixel indices: six (n_angles, 3) arrays (o0, o_u, o_v, d0, d_u,
+        d_v) with origin = o0 + iu o_u + iv o_v and likewise direction.
+        Cone beams start at the source and reach the pixel at t = 1."""
+        cu = (self.n_u - 1) / 2
+        cv = (self.n_v - 1) / 2
+        zero = np.zeros_like(self.source)
+        d0 = self.det_center - cu * self.det_u - cv * self.det_v - self.source
+        return self.source, zero, zero, d0, self.det_u, self.det_v
+
     def default_volume(self, shape=None, voxel_size=None):
         """A volume that covers the field of view, with the voxel size
         equal to the detector pitch demagnified to the rotation axis."""
@@ -369,6 +380,15 @@ class ParallelGeometry:
         return (self.det_center[k] +
                 iu[None, :, None] * self.det_u[k] +
                 iv[:, None, None] * self.det_v[k])
+
+    def ray_parameters(self):
+        """Rays as origin(iu, iv) + t * direction(iu, iv); see
+        ConeGeometry.ray_parameters. Parallel rays start at the pixel."""
+        cu = (self.n_u - 1) / 2
+        cv = (self.n_v - 1) / 2
+        zero = np.zeros_like(self.ray)
+        o0 = self.det_center - cu * self.det_u - cv * self.det_v
+        return o0, self.det_u, self.det_v, self.ray, zero, zero
 
     def projection_matrices(self):
         """(n_angles, 3, 4) affine matrices P: ``h = P @ [r, 1]`` gives

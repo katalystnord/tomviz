@@ -25,6 +25,24 @@
       "type": "int",
       "default": 60,
       "minimum": 1
+    },
+    {
+      "name": "backend",
+      "label": "Compute On",
+      "description": "Auto uses a GPU through WebGPU (any vendor, or a software adapter such as Mesa's lavapipe) and otherwise the CPU.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "CPU": "cpu"
+        },
+        {
+          "GPU": "gpu"
+        }
+      ]
     }
   ],
   "inputType": "Volume",
