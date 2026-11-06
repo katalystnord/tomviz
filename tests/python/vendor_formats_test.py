@@ -313,3 +313,55 @@ def test_other_hdf5_is_not_nxtomo(tmp_path):
     assert not is_nxtomo(str(tmp_path / 'x.h5'))
     (tmp_path / 'not.h5').write_text('text')
     assert not is_nxtomo(str(tmp_path / 'not.h5'))
+
+
+# -- Gatan DigitalMicrograph -------------------------------------------------
+
+class FakeDM:
+    """Stands in for tomviz.io.dm.FileDM with what it returns for a
+    tomography stack (ETSpy's HAADF.dm3: z in degrees, origin 45, step
+    2; pixels in um)."""
+    dataset = None
+
+    def __init__(self, path, on_memory=True):
+        pass
+
+    def getDataset(self, index):
+        return FakeDM.dataset
+
+
+def test_digitalmicrograph_tilt_series(monkeypatch):
+    from tomviz.io import dm
+    from tomviz.io.formats.digitalmicrograph import DigitalMicrographReader
+    data = np.arange(5 * 3 * 4, dtype=np.uint16).reshape(5, 3, 4)
+    FakeDM.dataset = {'data': data, 'pixelSize': [2.0, 0.018, 0.018],
+                      'pixelOrigin': [2.0, 0.0, 0.0],
+                      'pixelUnit': ['deg', 'µm', 'µm']}
+    monkeypatch.setattr(dm, 'FileDM', FakeDM)
+    ds = wrap(DigitalMicrographReader().read('stack.dm3'))
+    # Laid out like an MRC stack: x = columns, y = rows, z = image.
+    assert ds.active_scalars.shape == (4, 3, 5)
+    np.testing.assert_array_equal(ds.active_scalars[:, :, 1], data[1].T)
+    np.testing.assert_allclose(ds.tilt_angles, [-4, -2, 0, 2, 4])
+    assert ds.spacing[0] == pytest.approx(18.0)  # nm
+
+
+def test_digitalmicrograph_volume_keeps_z_spacing(monkeypatch):
+    from tomviz.io import dm
+    from tomviz.io.formats.digitalmicrograph import DigitalMicrographReader
+    FakeDM.dataset = {'data': np.zeros((2, 3, 4), np.float32),
+                      'pixelSize': [5.0, 1.0, 1.0], 'pixelOrigin': [0, 0, 0],
+                      'pixelUnit': ['Å', 'nm', 'nm']}
+    monkeypatch.setattr(dm, 'FileDM', FakeDM)
+    ds = wrap(DigitalMicrographReader().read('volume.dm4'))
+    assert ds.tilt_angles is None
+    assert ds.spacing[2] == pytest.approx(0.5)
+
+
+@pytest.mark.skipif(not __import__('os').environ.get('TOMVIZ_DM3_TILTS'),
+                    reason='set TOMVIZ_DM3_TILTS to ETSpy HAADF.dm3 to run')
+def test_digitalmicrograph_real_stack():
+    import os
+    from tomviz.io.formats.digitalmicrograph import DigitalMicrographReader
+    ds = wrap(DigitalMicrographReader().read(os.environ['TOMVIZ_DM3_TILTS']))
+    np.testing.assert_allclose(ds.tilt_angles, np.arange(-90, 91, 2.0))
