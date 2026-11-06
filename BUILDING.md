@@ -65,6 +65,23 @@ Tomviz may then be ran as follows:
 ./tomviz-build/bin/tomviz
 ```
 
+If you are changing the Python code, install it in editable mode instead
+(`pip install --no-build-isolation --no-deps -e tomviz/tomviz/python`).
+Otherwise the environment keeps the copy from the last install, and the
+Python tests run by `ctest` import that copy rather than your changes.
+
+On Linux, if Tomviz crashes at startup inside fontconfig (for example in
+`FcCharSetHasChar`), the system's fontconfig is probably older than the
+one in the conda environment and the two share `~/.cache/fontconfig`.
+Point Tomviz at the environment's configuration and a cache of its own:
+
+```bash
+export FONTCONFIG_FILE=$CONDA_PREFIX/etc/fonts/fonts.conf
+export FONTCONFIG_PATH=$CONDA_PREFIX/etc/fonts
+export XDG_CACHE_HOME=$HOME/.cache/tomviz-dev
+./tomviz-build/bin/tomviz
+```
+
 To run the test suite (`ctest` in the build directory), also install the
 test requirements:
 
