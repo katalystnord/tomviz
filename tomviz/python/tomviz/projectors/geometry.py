@@ -87,8 +87,77 @@ class VolumeGeometry:
                          for z in zs for y in ys for x in xs])
 
 
+def _orbit(angles_deg, clockwise):
+    """Angles in radians and the orbit basis for rotation about z: e_s
+    from the axis towards the source (opposite to the rays), e_u along
+    the detector rows, e_v along the axis. Each is (n_angles, 3)."""
+    beta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64).ravel())
+    if clockwise:
+        beta = -beta
+    c, s = np.cos(beta), np.sin(beta)
+    zero = np.zeros_like(beta)
+    e_s = np.stack([c, s, zero], axis=1)
+    e_u = np.stack([-s, c, zero], axis=1)
+    e_v = np.tile([0.0, 0.0, 1.0], (len(beta), 1))
+    return beta, e_s, e_u, e_v
+
+
+def _astra_vectors(vectors):
+    v = np.asarray(vectors, dtype=np.float64)
+    if v.ndim != 2 or v.shape[1] != 12:
+        raise ValueError('ASTRA vectors must have shape (n_angles, 12)')
+    return v[:, 0:3], v[:, 3:6], v[:, 6:9], v[:, 9:12]
+
+
+class _FlatDetector:
+    """What cone and parallel geometries share: per-projection vectors
+    ``first`` (source or ray), det_center, det_u and det_v, and a flat
+    detector of n_v rows by n_u columns."""
+
+    def _check_vectors(self, first):
+        names = (first, 'det_center', 'det_u', 'det_v')
+        for name in names:
+            v = np.asarray(getattr(self, name), dtype=np.float64)
+            if v.ndim != 2 or v.shape[1] != 3:
+                raise ValueError(f'{name} must have shape (n_angles, 3)')
+            setattr(self, name, v)
+        n = len(getattr(self, first))
+        if n < 1:
+            raise ValueError('Need at least one projection')
+        for name in names[1:]:
+            if len(getattr(self, name)) != n:
+                raise ValueError(f'{name} has a different number of '
+                                 f'projections from {first}')
+        self.n_u = int(self.n_u)
+        self.n_v = int(self.n_v)
+        if self.n_u < 1 or self.n_v < 1:
+            raise ValueError('Detector must have at least one pixel')
+
+    @property
+    def n_angles(self):
+        return len(self.det_center)
+
+    @property
+    def detector_shape(self):
+        return (self.n_v, self.n_u)
+
+    def _pitch(self):
+        """Typical detector pixel pitch (u, v)."""
+        return (float(np.median(np.linalg.norm(self.det_u, axis=1))),
+                float(np.median(np.linalg.norm(self.det_v, axis=1))))
+
+    def pixel_positions(self, k):
+        """World positions of the centres of every pixel of projection k,
+        shape (n_v, n_u, 3)."""
+        iu = np.arange(self.n_u) - (self.n_u - 1) / 2
+        iv = np.arange(self.n_v) - (self.n_v - 1) / 2
+        return (self.det_center[k] +
+                iu[None, :, None] * self.det_u[k] +
+                iv[:, None, None] * self.det_v[k])
+
+
 @dataclass
-class ConeGeometry:
+class ConeGeometry(_FlatDetector):
     """Per-projection cone-beam geometry. See the module docstring."""
 
     source: np.ndarray  # (n_angles, 3)
@@ -102,22 +171,7 @@ class ConeGeometry:
     nominal_angles: Optional[np.ndarray] = field(default=None)
 
     def __post_init__(self):
-        for name in ('source', 'det_center', 'det_u', 'det_v'):
-            v = np.asarray(getattr(self, name), dtype=np.float64)
-            if v.ndim != 2 or v.shape[1] != 3:
-                raise ValueError(f'{name} must have shape (n_angles, 3)')
-            setattr(self, name, v)
-        n = len(self.source)
-        if n < 1:
-            raise ValueError('Need at least one projection')
-        for name in ('det_center', 'det_u', 'det_v'):
-            if len(getattr(self, name)) != n:
-                raise ValueError(f'{name} has a different number of '
-                                 'projections from source')
-        self.n_u = int(self.n_u)
-        self.n_v = int(self.n_v)
-        if self.n_u < 1 or self.n_v < 1:
-            raise ValueError('Detector must have at least one pixel')
+        self._check_vectors('source')
         if np.any(np.linalg.norm(np.cross(self.det_u, self.det_v),
                                  axis=1) == 0):
             raise ValueError('det_u and det_v must not be parallel')
@@ -150,14 +204,7 @@ class ConeGeometry:
                              f'source-detector distance (got {sod}, {sdd})')
         if not pixel_u > 0 or not pixel_v > 0:
             raise ValueError('Pixel pitch must be positive')
-        beta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64).ravel())
-        if clockwise:
-            beta = -beta
-        c, s = np.cos(beta), np.sin(beta)
-        zero = np.zeros_like(beta)
-        e_s = np.stack([c, s, zero], axis=1)  # axis -> source direction
-        e_u = np.stack([-s, c, zero], axis=1)
-        e_v = np.tile([0.0, 0.0, 1.0], (len(beta), 1))
+        beta, e_s, e_u, e_v = _orbit(angles_deg, clockwise)
         source = sod * e_s
         # The central ray hits the detector at index (n-1)/2 + offset, so
         # the detector centre sits -offset pixels from that point.
@@ -172,20 +219,9 @@ class ConeGeometry:
     def from_astra_vectors(cls, vectors, n_u, n_v):
         """From an ASTRA ``cone_vec`` array of shape (n_angles, 12):
         source, detector centre, u step, v step."""
-        v = np.asarray(vectors, dtype=np.float64)
-        if v.ndim != 2 or v.shape[1] != 12:
-            raise ValueError('ASTRA vectors must have shape (n_angles, 12)')
-        return cls(v[:, 0:3], v[:, 3:6], v[:, 6:9], v[:, 9:12], n_u, n_v)
+        return cls(*_astra_vectors(vectors), n_u, n_v)
 
     # -- derived quantities ------------------------------------------------
-
-    @property
-    def n_angles(self):
-        return len(self.source)
-
-    @property
-    def detector_shape(self):
-        return (self.n_v, self.n_u)
 
     def _normal_unit(self):
         n = np.cross(self.det_u, self.det_v)
@@ -263,15 +299,6 @@ class ConeGeometry:
                                      axis=1))
         return h[:, 0] / h[:, 2], h[:, 1] / h[:, 2]
 
-    def pixel_positions(self, k):
-        """World positions of the centres of every pixel of projection k,
-        shape (n_v, n_u, 3)."""
-        iu = np.arange(self.n_u) - (self.n_u - 1) / 2
-        iv = np.arange(self.n_v) - (self.n_v - 1) / 2
-        return (self.det_center[k] +
-                iu[None, :, None] * self.det_u[k] +
-                iv[:, None, None] * self.det_v[k])
-
     def ray_parameters(self):
         """Rays as origin(iu, iv) + t * direction(iu, iv), both linear in
         the pixel indices: six (n_angles, 3) arrays (o0, o_u, o_v, d0, d_u,
@@ -287,8 +314,7 @@ class ConeGeometry:
         """A volume that covers the field of view, with the voxel size
         equal to the detector pitch demagnified to the rotation axis."""
         mag = float(np.median(self.sdd() / self.sod()))
-        pu = float(np.median(np.linalg.norm(self.det_u, axis=1)))
-        pv = float(np.median(np.linalg.norm(self.det_v, axis=1)))
+        pu, pv = self._pitch()
         if voxel_size is None:
             voxel_size = pu / mag
         if shape is None:
@@ -299,7 +325,7 @@ class ConeGeometry:
 
 
 @dataclass
-class ParallelGeometry:
+class ParallelGeometry(_FlatDetector):
     """Per-projection parallel-beam geometry, ASTRA ``parallel3d_vec``
     layout: ray direction, detector centre, u step, v step."""
 
@@ -311,22 +337,7 @@ class ParallelGeometry:
     n_v: int
 
     def __post_init__(self):
-        for name in ('ray', 'det_center', 'det_u', 'det_v'):
-            v = np.asarray(getattr(self, name), dtype=np.float64)
-            if v.ndim != 2 or v.shape[1] != 3:
-                raise ValueError(f'{name} must have shape (n_angles, 3)')
-            setattr(self, name, v)
-        n = len(self.ray)
-        if n < 1:
-            raise ValueError('Need at least one projection')
-        for name in ('det_center', 'det_u', 'det_v'):
-            if len(getattr(self, name)) != n:
-                raise ValueError(f'{name} has a different number of '
-                                 'projections from ray')
-        self.n_u = int(self.n_u)
-        self.n_v = int(self.n_v)
-        if self.n_u < 1 or self.n_v < 1:
-            raise ValueError('Detector must have at least one pixel')
+        self._check_vectors('ray')
         det_n = np.cross(self.det_u, self.det_v)
         if np.any(np.einsum('ij,ij->i', det_n, self.ray) == 0):
             raise ValueError('Rays must not run parallel to the detector, '
@@ -344,14 +355,7 @@ class ParallelGeometry:
         """
         if not pixel_u > 0 or not pixel_v > 0:
             raise ValueError('Pixel pitch must be positive')
-        beta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64).ravel())
-        if clockwise:
-            beta = -beta
-        c, s = np.cos(beta), np.sin(beta)
-        zero = np.zeros_like(beta)
-        e_s = np.stack([c, s, zero], axis=1)
-        e_u = np.stack([-s, c, zero], axis=1)
-        e_v = np.tile([0.0, 0.0, 1.0], (len(beta), 1))
+        _, e_s, e_u, e_v = _orbit(angles_deg, clockwise)
         det_center = -offset_u * pixel_u * e_u - offset_v * pixel_v * e_v
         return cls(-e_s, det_center, pixel_u * e_u, pixel_v * e_v, n_u, n_v)
 
@@ -359,27 +363,7 @@ class ParallelGeometry:
     def from_astra_vectors(cls, vectors, n_u, n_v):
         """From an ASTRA ``parallel3d_vec`` array of shape (n_angles, 12):
         ray direction, detector centre, u step, v step."""
-        v = np.asarray(vectors, dtype=np.float64)
-        if v.ndim != 2 or v.shape[1] != 12:
-            raise ValueError('ASTRA vectors must have shape (n_angles, 12)')
-        return cls(v[:, 0:3], v[:, 3:6], v[:, 6:9], v[:, 9:12], n_u, n_v)
-
-    @property
-    def n_angles(self):
-        return len(self.ray)
-
-    @property
-    def detector_shape(self):
-        return (self.n_v, self.n_u)
-
-    def pixel_positions(self, k):
-        """World positions of the centres of every pixel of projection k,
-        shape (n_v, n_u, 3)."""
-        iu = np.arange(self.n_u) - (self.n_u - 1) / 2
-        iv = np.arange(self.n_v) - (self.n_v - 1) / 2
-        return (self.det_center[k] +
-                iu[None, :, None] * self.det_u[k] +
-                iv[:, None, None] * self.det_v[k])
+        return cls(*_astra_vectors(vectors), n_u, n_v)
 
     def ray_parameters(self):
         """Rays as origin(iu, iv) + t * direction(iu, iv); see
@@ -417,8 +401,7 @@ class ParallelGeometry:
     def default_volume(self, shape=None, voxel_size=None):
         """A volume that covers the detector's field of view, with the
         voxel size equal to the detector pitch (no magnification)."""
-        pu = float(np.median(np.linalg.norm(self.det_u, axis=1)))
-        pv = float(np.median(np.linalg.norm(self.det_v, axis=1)))
+        pu, pv = self._pitch()
         if voxel_size is None:
             voxel_size = pu
         if shape is None:
