@@ -4075,6 +4075,43 @@ struct PlaneCountingSink : OutlineSink
 };
 } // namespace
 
+namespace {
+QStringList g_warnings;
+void recordWarning(QtMsgType type, const QMessageLogContext&,
+                   const QString& msg)
+{
+  if (type == QtWarningMsg) {
+    g_warnings << msg;
+  }
+}
+} // namespace
+
+TEST_F(PipelineLibTest, UnconnectedInputIsNamedWhenRunFails)
+{
+  // A transform whose extra input was never wired must say which one,
+  // instead of failing silently.
+  auto* source = new SourceNode();
+  source->addOutput("out", PortType::ImageData);
+  pipeline->addNode(source);
+  auto* add = new AddTransform();
+  add->setLabel("Merge");
+  pipeline->addNode(add);
+  pipeline->createLink(source->outputPort("out"), add->inputPort("a"));
+  source->setOutputData("out", PortData(std::any(10), PortType::ImageData));
+
+  g_warnings.clear();
+  auto previous = qInstallMessageHandler(recordWarning);
+  bool ran = add->execute();
+  qInstallMessageHandler(previous);
+
+  EXPECT_FALSE(ran);
+  EXPECT_EQ(add->execState(), NodeExecState::Failed);
+  ASSERT_EQ(g_warnings.size(), 1);
+  EXPECT_TRUE(g_warnings[0].contains("Merge cannot run")) << g_warnings[0].toStdString();
+  EXPECT_TRUE(g_warnings[0].contains("'b'")) << g_warnings[0].toStdString();
+  EXPECT_FALSE(g_warnings[0].contains("'a'")) << g_warnings[0].toStdString();
+}
+
 TEST_F(PipelineLibTest, ClipSinkCutsDisplaysInAndOutsideGroups)
 {
   // A Clip cuts every display of the same data: those attached directly

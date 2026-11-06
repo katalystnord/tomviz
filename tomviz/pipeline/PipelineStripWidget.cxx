@@ -1222,6 +1222,15 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
     }
     return tr("Output port: %1").arg(portTypeToString(outPort->type()));
   }
+  if (auto* inPort = inputPortHitTest(pos)) {
+    if (auto* link = inPort->link()) {
+      auto* from = link->from() ? link->from()->node() : nullptr;
+      return tr("Input '%1', from %2")
+        .arg(inPort->name(), from ? from->label() : tr("nothing"));
+    }
+    return tr("Input '%1' is not connected: drag an output port onto it")
+      .arg(inPort->name());
+  }
   if (linkHitTest(pos)) {
     return tr("Link");
   }
@@ -1231,6 +1240,22 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
     // Expanded output ports (port cards) get the same tooltip as the dots.
     if (item.type == LayoutItem::PortCard && item.port) {
       return tr("Output port: %1").arg(portTypeToString(item.port->type()));
+    }
+    // State icon: say which inputs still need connecting.
+    if (item.type == LayoutItem::NodeCard && item.node &&
+        menuButtonRect(item.rect)
+          .translated(-(HeaderButtonSpacing + HeaderIconSize), 0)
+          .contains(pos)) {
+      QStringList missing;
+      for (auto* input : item.node->inputPorts()) {
+        if (!input->link()) {
+          missing << QStringLiteral("'%1'").arg(input->name());
+        }
+      }
+      if (!missing.isEmpty()) {
+        return tr("Cannot run until input %1 is connected")
+          .arg(missing.join(QStringLiteral(", ")));
+      }
     }
     // Periodic-execution button in the node header.
     if (item.type == LayoutItem::NodeCard && item.node &&
