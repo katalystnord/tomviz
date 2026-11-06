@@ -279,6 +279,7 @@ class WgpuBackprojector:
 
     def backproject(self, filtered, geom, vol_geom, threads=None,
                     progress=None, should_stop=None, slab=None):
+        from . import backproject_cpu
         wgpu = self.wgpu
         should_stop = should_stop or (lambda: False)
         filtered = np.ascontiguousarray(filtered, dtype=np.float32)
@@ -310,12 +311,10 @@ class WgpuBackprojector:
                           [0, 0, dz, z_all[s0]],
                           [0, 0, 0, 1.0]])
             M = P @ G  # (n_angles, 3, 4), in float64 until upload
-            corners = np.concatenate(
-                [vol_geom.slab_corners(s0, s1), np.ones((8, 1))], axis=1)
-            h = np.einsum('kij,cj->kci', P, corners)
-            if np.any(h[:, :, 2] <= 0):
-                raise RuntimeError('Part of the volume is behind the '
-                                   'source; make the volume smaller')
+            corners = vol_geom.slab_corners(s0, s1)
+            backproject_cpu.check_in_front_of_source(P, corners)
+            h = np.einsum('kij,cj->kci', P, np.concatenate(
+                [corners, np.ones((8, 1))], axis=1))
             vcorner = h[:, :, 1] / h[:, :, 2]
             v_lo = np.clip(np.floor(vcorner.min(1)) - 1, 0, n_v).astype(int)
             v_hi = np.clip(np.ceil(vcorner.max(1)) + 2, 0, n_v).astype(int)

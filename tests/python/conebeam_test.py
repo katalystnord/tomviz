@@ -323,3 +323,21 @@ def test_auto_falls_back_to_cpu(monkeypatch, no_cached_backend):
     assert 'GPU unavailable' in be.description
     with pytest.raises(RuntimeError, match='GPU backend unavailable'):
         get_backend('gpu')
+
+
+def test_volume_behind_the_source_is_rejected():
+    # The box reaches 30 past the axis, the source is only 20 away. The
+    # CPU path used to add mirrored data there instead of stopping.
+    from tomviz.projectors import backproject_cpu
+    g = ConeGeometry.circular(np.arange(0, 360, 30), 20, 40, 1.0, 1.0,
+                              16, 8)
+    vg = VolumeGeometry((4, 60, 60), 1.0)
+    filt = np.ones((g.n_angles, 8, 16), dtype=np.float32)
+    with pytest.raises(RuntimeError, match='behind the source'):
+        backproject_cpu.backproject(filt, g, vg, threads=THREADS)
+    try:
+        be = _gpu_backend()
+    except pytest.skip.Exception:
+        return
+    with pytest.raises(RuntimeError, match='behind the source'):
+        be.backproject(filt, g, vg)

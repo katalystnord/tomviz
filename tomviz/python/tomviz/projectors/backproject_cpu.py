@@ -23,6 +23,18 @@ def default_threads():
     return os.cpu_count() or 1
 
 
+def check_in_front_of_source(P, corners):
+    """Raise if any of the box corners (n, 3) is at or behind the source
+    for any projection matrix in P. The depth h[2] is linear, so the
+    corners decide it for the whole box."""
+    h = np.einsum('kij,cj->kci', P,
+                  np.concatenate([corners, np.ones((len(corners), 1))],
+                                 axis=1))
+    if np.any(h[:, :, 2] <= 0):
+        raise RuntimeError('Part of the volume is behind the source; '
+                           'make the volume smaller')
+
+
 def _bilinear(img, u, v):
     """Sample img (n_v, n_u) at fractional index coordinates; zero outside
     the detector."""
@@ -77,6 +89,7 @@ def backproject(filtered, geom, vol_geom, threads=None, slab=None,
     filtered = np.ascontiguousarray(filtered, dtype=np.float32)
     P = geom.projection_matrices()
     nz, ny, nx = vol_geom.shape
+    check_in_front_of_source(P, vol_geom.slab_corners(0, nz))
     x, y, z = vol_geom.x_coords(), vol_geom.y_coords(), vol_geom.z_coords()
     if slab is None:
         # About 2 M voxels per slab: big enough for numpy to be efficient,
