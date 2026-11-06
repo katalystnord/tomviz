@@ -18,7 +18,7 @@ Environment variables (optional):
 """
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from . import backproject_cpu, forward_cpu
 
@@ -29,6 +29,8 @@ class Backend:
     description: str
     backproject: Callable
     forward_project: Callable
+    # Optional: the whole SIRT loop on the device (see webgpu.sirt_loop).
+    sirt_loop: Optional[Callable] = None
 
 
 def cpu_backend(reason=None):

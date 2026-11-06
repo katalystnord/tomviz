@@ -191,6 +191,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 """
 
+# Element-wise steps of SIRT, so its whole loop can stay on the GPU.
+# residual: a = w * (c - a), with a = A x, w = R, c = b.
+# update: a = a + w * c (clipped at 0 if asked), with a = x, w = C, c = the
+# backprojected residual.
+ELEMENTWISE_SHADER = """
+struct Params { n: u32, nonneg: u32, pad0: u32, pad1: u32, }
+
+@group(0) @binding(0) var<storage, read_write> a: array<f32>;
+@group(0) @binding(1) var<storage, read> w: array<f32>;
+@group(0) @binding(2) var<storage, read> c: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn index(gid: vec3<u32>, nwg: vec3<u32>) -> u32 {
+    return gid.x + gid.y * nwg.x * 256u;
+}
+
+@compute @workgroup_size(256)
+fn residual(@builtin(global_invocation_id) gid: vec3<u32>,
+            @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= params.n) { return; }
+    a[i] = w[i] * (c[i] - a[i]);
+}
+
+@compute @workgroup_size(256)
+fn update(@builtin(global_invocation_id) gid: vec3<u32>,
+          @builtin(num_workgroups) nwg: vec3<u32>) {
+    let i = index(gid, nwg);
+    if (i >= params.n) { return; }
+    var v = a[i] + w[i] * c[i];
+    if (params.nonneg == 1u) { v = max(v, 0.0); }
+    a[i] = v;
+}
+"""
+
 # Rough number of voxel updates one dispatch may do, to keep each dispatch
 # well under the ~2 s watchdog of some drivers even on slow GPUs.
 MAX_UPDATES_PER_DISPATCH = 1 << 29
@@ -256,6 +291,12 @@ class WgpuBackprojector:
         module = self.device.create_shader_module(code=FORWARD_SHADER)
         self.forward_pipeline = self.device.create_compute_pipeline(
             layout='auto', compute={'module': module, 'entry_point': 'main'})
+        module = self.device.create_shader_module(code=ELEMENTWISE_SHADER)
+        self.residual_pipeline, self.update_pipeline = (
+            self.device.create_compute_pipeline(
+                layout='auto', compute={'module': module,
+                                        'entry_point': name})
+            for name in ('residual', 'update'))
         # Reading this tiny buffer back waits for all submitted work. (The
         # queue's on_submitted_work_done is broken in some wgpu-py
         # releases, and this works everywhere.)
@@ -481,6 +522,205 @@ class WgpuBackprojector:
             vol_buf.destroy()
         return out
 
+    def _elementwise(self, pipeline, a, w, c, n, nonneg=False):
+        """Bind group, workgroup counts and parameter buffer for an
+        element-wise SIRT step on n values."""
+        params = np.array([n, int(nonneg), 0, 0], dtype=np.uint32)
+        par_buf = self.device.create_buffer_with_data(
+            data=params, usage=self.wgpu.BufferUsage.UNIFORM)
+        bind = self.device.create_bind_group(
+            layout=pipeline.get_bind_group_layout(0),
+            entries=[{'binding': i, 'resource': {'buffer': b}}
+                     for i, b in enumerate((a, w, c, par_buf))])
+        groups = -(-n // 256)
+        gx = min(groups, self.max_groups)
+        return bind, (gx, -(-groups // gx), 1), par_buf
+
+    def sirt_loop(self, b, R, C, x, geom, vol_geom, iterations,
+                  nonnegative=True, should_stop=None, progress=None,
+                  callback=None, volume_needed=None, log=None):
+        """Run SIRT iterations with everything on the GPU:
+        x <- x + C * A^T (R * (b - A x)), clipped at 0 if nonnegative.
+
+        b, R: (n_angles, n_v, n_u) projections and row weights.
+        C: column weights, already scaled by the relaxation. x: start.
+        progress(iteration) after each one; callback(it, x) as for
+        sirt(), with x None when volume_needed(it) says it is not used.
+
+        Only the volume comes back. Returns the volume, None if stopped,
+        or NotImplemented if the problem does not fit on this GPU (then
+        the caller runs the general loop)."""
+        log = log or (lambda msg: None)
+        should_stop = should_stop or (lambda: False)
+        nz, ny, nx = vol_geom.shape
+        n, n_v, n_u = geom.n_angles, geom.n_v, geom.n_u
+        plane = ny * nx
+        n_vox = nz * plane
+        per_proj = n_u * n_v
+        if n_vox * 4 > self.max_binding or per_proj * 4 > self.max_binding:
+            log('SIRT on the GPU streams the data (the volume is larger '
+                'than one GPU buffer)')
+            return NotImplemented
+        planes = max(nx, ny, nz)
+        batch = max(1, min(n,
+                           MAX_UPDATES_PER_DISPATCH //
+                           max(1, per_proj * planes),
+                           MAX_UPDATES_PER_DISPATCH // max(1, n_vox),
+                           self.max_binding // (4 * per_proj),
+                           self.max_groups))
+        try:
+            plan = self._sirt_resident(b, R, C, x, geom, vol_geom, batch)
+        except Exception as e:
+            log(f'SIRT on the GPU streams the data ({e})')
+            return NotImplemented
+        try:
+            return self._sirt_iterate(plan, iterations, nonnegative,
+                                      should_stop, progress, callback,
+                                      volume_needed, vol_geom.shape)
+        finally:
+            for buf in plan['buffers']:
+                buf.destroy()
+
+    def _sirt_resident(self, b, R, C, x, geom, vol_geom, batch):
+        """Upload everything SIRT needs and record one iteration's work:
+        per projection batch, a forward projection, the residual and a
+        backprojection, as bind groups to reuse every iteration."""
+        from . import backproject_cpu
+        from .forward_cpu import index_space_rays
+        wgpu = self.wgpu
+        nz, ny, nx = vol_geom.shape
+        n, n_v, n_u = geom.n_angles, geom.n_v, geom.n_u
+        per_proj = n_u * n_v
+        n_vox = nz * ny * nx
+        buffers = []
+
+        def upload(a, usage=0):
+            buf = self._buffer(np.ascontiguousarray(a, dtype=np.float32),
+                               usage=usage)
+            buffers.append(buf)
+            return buf
+
+        def uniform(values, dtype):
+            buf = self.device.create_buffer_with_data(
+                data=np.asarray(values, dtype=dtype),
+                usage=wgpu.BufferUsage.UNIFORM)
+            buffers.append(buf)
+            return buf
+
+        try:
+            x_buf = upload(x, wgpu.BufferUsage.COPY_SRC)
+            c_buf = upload(C)
+            u_buf = self._buffer(size=n_vox * 4,
+                                 usage=wgpu.BufferUsage.COPY_DST)
+            buffers.append(u_buf)
+            r_buf = self._buffer(size=batch * per_proj * 4)
+            buffers.append(r_buf)
+
+            # Backprojection matrices for the whole volume as one slab.
+            P = geom.projection_matrices()
+            backproject_cpu.check_in_front_of_source(
+                P, vol_geom.slab_corners(0, nz))
+            dz, dy, dx = vol_geom.voxel_size
+            G = np.array([[dx, 0, 0, vol_geom.x_coords()[0]],
+                          [0, dy, 0, vol_geom.y_coords()[0]],
+                          [0, 0, dz, vol_geom.z_coords()[0]],
+                          [0, 0, 0, 1.0]])
+            mats = (P @ G).astype(np.float32)
+            rays, scale = index_space_rays(geom, vol_geom)
+            rays = np.stack(rays, axis=1)
+            rays = np.concatenate([rays, np.zeros((n, 6, 1))], axis=2)
+
+            steps = []
+            for k0 in range(0, n, batch):
+                k1 = min(n, k0 + batch)
+                nk = k1 - k0
+                fwd = np.zeros(16, dtype=np.uint32)
+                fwd[:6] = [n_u, n_v, nk, nx, ny, nz]
+                # The whole volume is one slab that owns every sample.
+                fwd[6:10] = np.array([0, nz, -1, nz],
+                                     dtype=np.int32).view(np.uint32)
+                fwd[12:15] = np.array(scale, dtype=np.float32).view(
+                    np.uint32)
+                fwd_bind = self.device.create_bind_group(
+                    layout=self.forward_pipeline.get_bind_group_layout(0),
+                    entries=[
+                        {'binding': 0, 'resource': {'buffer': x_buf}},
+                        {'binding': 1,
+                         'resource': {'buffer': upload(rays[k0:k1])}},
+                        {'binding': 2, 'resource': {'buffer': r_buf}},
+                        {'binding': 3,
+                         'resource': {'buffer': uniform(fwd, np.uint32)}},
+                    ])
+                res = self._elementwise(self.residual_pipeline, r_buf,
+                                        upload(R[k0:k1]), upload(b[k0:k1]),
+                                        nk * per_proj)
+                buffers.append(res[2])
+                bp_bind = self.device.create_bind_group(
+                    layout=self.pipeline.get_bind_group_layout(0),
+                    entries=[
+                        {'binding': 0, 'resource': {'buffer': r_buf}},
+                        {'binding': 1,
+                         'resource': {'buffer': upload(mats[k0:k1])}},
+                        {'binding': 2, 'resource': {'buffer': u_buf}},
+                        {'binding': 3, 'resource': {'buffer': uniform(
+                            [nx, ny, nz, nk, n_u, n_v, 0, 0], np.uint32)}},
+                    ])
+                steps.append((fwd_bind, nk, res, bp_bind))
+        except Exception:
+            for buf in buffers:
+                buf.destroy()
+            raise
+        return dict(buffers=buffers, x=x_buf, c=c_buf, u=u_buf,
+                    steps=steps, n_vox=n_vox, n_u=n_u, n_v=n_v,
+                    nx=nx, ny=ny, nz=nz)
+
+    def _sirt_iterate(self, plan, iterations, nonnegative, should_stop,
+                      progress, callback, volume_needed, shape):
+        n_u, n_v = plan['n_u'], plan['n_v']
+        nx, ny, nz = plan['nx'], plan['ny'], plan['nz']
+        upd_bind, upd_groups, upd_par = self._elementwise(
+            self.update_pipeline, plan['x'], plan['c'], plan['u'],
+            plan['n_vox'], nonneg=nonnegative)
+        plan['buffers'].append(upd_par)
+
+        def read_x():
+            data = self.device.queue.read_buffer(plan['x'])
+            return np.frombuffer(data, dtype=np.float32).reshape(
+                shape).copy()
+
+        def run(pipeline, bind, groups):
+            enc = self.device.create_command_encoder()
+            cp = enc.begin_compute_pass()
+            cp.set_pipeline(pipeline)
+            cp.set_bind_group(0, bind)
+            cp.dispatch_workgroups(*groups)
+            cp.end()
+            # One submission per dispatch keeps each one short for the
+            # driver watchdog; the queue runs them in order.
+            self.device.queue.submit([enc.finish()])
+
+        for it in range(iterations):
+            if should_stop():
+                return None
+            enc = self.device.create_command_encoder()
+            enc.clear_buffer(plan['u'])
+            self.device.queue.submit([enc.finish()])
+            for fwd_bind, nk, res, bp_bind in plan['steps']:
+                run(self.forward_pipeline, fwd_bind,
+                    (-(-n_u // 8), -(-n_v // 8), nk))
+                run(self.residual_pipeline, res[0], res[1])
+                run(self.pipeline, bp_bind,
+                    (-(-nx // 8), -(-ny // 8), -(-nz // 4)))
+            run(self.update_pipeline, upd_bind, upd_groups)
+            self._wait()
+            if progress is not None:
+                progress(it)
+            if callback is not None:
+                want = volume_needed is None or volume_needed(it)
+                if callback(it, read_x() if want else None):
+                    break
+        return read_x()
+
     def self_test(self):
         """Backproject a tiny problem and compare with the CPU path."""
         from . import backproject_cpu
@@ -532,5 +772,5 @@ def make_backend():
         _failure = str(e) or type(e).__name__
         raise
     _cached = Backend('gpu', bp.description, bp.backproject,
-                      bp.forward_project)
+                      bp.forward_project, bp.sirt_loop)
     return _cached

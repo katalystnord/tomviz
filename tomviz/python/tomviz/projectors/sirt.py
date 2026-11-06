@@ -26,7 +26,7 @@ def _safe_inverse(a, rel=1e-6):
 
 def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
          nonnegative=True, backend='cpu', x0=None, progress=None,
-         should_stop=None, callback=None, log=None):
+         should_stop=None, callback=None, volume_needed=None, log=None):
     """Reconstruct a volume from line-integral projections.
 
     projections: (n_angles, n_v, n_u) array.
@@ -40,6 +40,9 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
     polled once per iteration; if it says True, SIRT returns None.
     callback(iteration, x) runs after every iteration (for live views);
     if it returns True, SIRT stops early and returns the current x.
+    volume_needed(iteration), if given, says whether the callback will
+    use x at that iteration; when it says False, x may be None. On a GPU
+    that saves copying the volume back every iteration.
     log(message) receives human-readable notes.
 
     Returns a float32 (n_z, n_y, n_x) volume.
@@ -88,6 +91,20 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
         x = np.array(x0, dtype=np.float32, copy=True)
         if x.shape != vol_geom.shape:
             raise ValueError('x0 does not match the volume')
+
+    if be.sirt_loop is not None:
+        def progress_it(it):
+            if progress is not None:
+                progress((it + 2) / steps)
+
+        # b, R and C stay on the device; only the volume comes back.
+        result = be.sirt_loop(b, R, C, x, geom, vol_geom, iterations,
+                              nonnegative=nonnegative,
+                              should_stop=should_stop,
+                              progress=progress_it, callback=callback,
+                              volume_needed=volume_needed, log=log)
+        if result is not NotImplemented:
+            return result
     for it in range(iterations):
         if should_stop():
             return None

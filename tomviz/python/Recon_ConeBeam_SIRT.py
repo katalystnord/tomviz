@@ -37,11 +37,14 @@ class ReconConeBeamSIRTOperator(tomviz.operators.CompletableOperator):
         def progress(fraction):
             self.progress.value = int(round(100 * fraction))
 
+        def show(it):
+            return (update_every > 0 and (it + 1) % update_every == 0 and
+                    it + 1 < iterations)
+
         def callback(it, x):
             self.progress.message = '; '.join(
                 notes + [f'Iteration {it + 1} of {iterations}'])
-            if update_every > 0 and (it + 1) % update_every == 0 and \
-                    it + 1 < iterations:
+            if show(it):
                 set_volume(child, x, vol_geom)
                 self.progress.data = child
             # Stop early, keeping the result so far, when asked to finish.
@@ -51,7 +54,7 @@ class ReconConeBeamSIRTOperator(tomviz.operators.CompletableOperator):
                    relaxation=relaxation, nonnegative=nonnegative,
                    backend=backend, progress=progress,
                    should_stop=lambda: self.canceled, callback=callback,
-                   log=log)
+                   volume_needed=show, log=log)
         if vol is None:
             return None
         set_volume(child, vol, vol_geom)

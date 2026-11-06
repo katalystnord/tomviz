@@ -99,6 +99,78 @@ def test_sirt_gpu_matches_cpu(sparse_cone):
     np.testing.assert_allclose(gpu, cpu, atol=1e-4 * abs(cpu).max())
 
 
+def streaming(be):
+    """The same GPU backend without the on-device SIRT loop."""
+    import dataclasses
+    return dataclasses.replace(be, sirt_loop=None)
+
+
+@pytest.mark.parametrize('kind', ['cone', 'parallel'])
+def test_sirt_gpu_resident_matches_streaming(sparse_cone, phantom,
+                                             monkeypatch, kind):
+    from tomviz.projectors import webgpu
+    be = gpu_backend()
+    if kind == 'cone':
+        g, vg, proj, _ = sparse_cone
+    else:
+        g = ParallelGeometry.circular(np.arange(-60, 61, 10.0), 0.75, 0.75,
+                                      32, 20)
+        vg = VolumeGeometry((20, 28, 28), 0.75)
+        proj = phantom.project(g)
+    x0 = np.full(vg.shape, 0.01, dtype=np.float32)
+    kw = dict(iterations=4, nonnegative=False, x0=x0)
+    cpu = sirt(proj, g, vg, backend='cpu', **kw)
+    streamed = sirt(proj, g, vg, backend=streaming(be), **kw)
+    notes = []
+    # Tiny dispatches: many projection batches per iteration.
+    monkeypatch.setattr(webgpu, 'MAX_UPDATES_PER_DISPATCH', 1 << 14)
+    resident = sirt(proj, g, vg, backend=be, log=notes.append, **kw)
+    assert not any('streams' in n for n in notes)
+    tol = 1e-4 * abs(cpu).max()
+    np.testing.assert_allclose(resident, cpu, atol=tol)
+    np.testing.assert_allclose(resident, streamed, atol=tol)
+    assert resident.min() < 0  # nonnegative=False was honoured
+
+
+def test_sirt_gpu_callback_volume_needed_and_stop(sparse_cone):
+    be = gpu_backend()
+    g, vg, proj, _ = sparse_cone
+    seen = []
+
+    def callback(it, x):
+        seen.append((it, None if x is None else x.copy()))
+        return it == 3  # finish early after the fourth iteration
+
+    x = sirt(proj, g, vg, iterations=10, backend=be, callback=callback,
+             volume_needed=lambda it: it % 2 == 1)
+    assert [it for it, _ in seen] == [0, 1, 2, 3]
+    assert seen[0][1] is None and seen[2][1] is None
+    np.testing.assert_array_equal(seen[3][1], x)
+    ref = sirt(proj, g, vg, iterations=4, backend='cpu')
+    np.testing.assert_allclose(x, ref, atol=1e-4 * abs(ref).max())
+    calls = []
+
+    def stop():
+        calls.append(1)
+        return len(calls) > 3
+
+    assert sirt(proj, g, vg, iterations=10, backend=be,
+                should_stop=stop) is None
+
+
+def test_sirt_gpu_falls_back_when_too_big(sparse_cone, monkeypatch):
+    be = gpu_backend()
+    g, vg, proj, _ = sparse_cone
+    bp = be.sirt_loop.__self__
+    # Room for a slice and a projection, not for the whole volume.
+    monkeypatch.setattr(bp, 'max_binding', 4 * 28 * 28 * 4)
+    notes = []
+    x = sirt(proj, g, vg, iterations=3, backend=be, log=notes.append)
+    assert any('streams' in n for n in notes)
+    ref = sirt(proj, g, vg, iterations=3, backend='cpu')
+    np.testing.assert_allclose(x, ref, atol=1e-4 * abs(ref).max())
+
+
 # -- Operator --------------------------------------------------------------
 
 def test_sirt_operator(phantom, sparse_cone):
