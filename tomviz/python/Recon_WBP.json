@@ -70,6 +70,24 @@
       "type": "int",
       "default": 0,
       "minimum": 0
+    },
+    {
+      "name": "backend",
+      "label": "Compute On",
+      "description": "Auto uses a GPU through WebGPU (any vendor, or a software adapter such as Mesa's lavapipe) for Linear and Spline interpolation, and otherwise the CPU.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "CPU": "cpu"
+        },
+        {
+          "GPU": "gpu"
+        }
+      ]
     }
   ],
   "help": {

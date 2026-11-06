@@ -47,6 +47,8 @@ fn sample(k: u32, u: f32, v: f32) -> f32 {
         let vi = v0 + dv;
         if (vi < 0 || vi >= nr) { continue; }
         let wv = select(1.0 - av, av, dv == 1);
+        // Parallel beams land exactly on rows: skip the unused one.
+        if (wv == 0.0) { continue; }
         for (var du = 0; du < 2; du++) {
             let ui = u0 + du;
             if (ui < 0 || ui >= nu) { continue; }

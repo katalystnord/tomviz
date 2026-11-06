@@ -74,8 +74,9 @@ class EllipsoidPhantom:
         return out / supersample**3
 
     def line_integrals(self, origins, directions):
-        """Exact integrals along rays origin + t * direction, t >= 0, for
-        unit direction vectors. Both arrays are (..., 3)."""
+        """Exact integrals along the whole lines origin + t * direction,
+        for unit direction vectors (the phantom must not contain the
+        origins of cone-beam rays). Both arrays are (..., 3)."""
         total = np.zeros(origins.shape[:-1], dtype=np.float64)
         for i in range(len(self.density)):
             p = self._local(i, origins)
@@ -90,12 +91,21 @@ class EllipsoidPhantom:
         return total
 
     def project(self, geom, dtype=np.float32):
-        """Exact cone-beam projections, shape (n_angles, n_v, n_u)."""
+        """Exact projections for a ConeGeometry or ParallelGeometry, shape
+        (n_angles, n_v, n_u)."""
         out = np.empty((geom.n_angles, geom.n_v, geom.n_u), dtype=dtype)
+        parallel = hasattr(geom, 'ray')
         for k in range(geom.n_angles):
             pix = geom.pixel_positions(k)
-            d = pix - geom.source[k]
-            d /= np.linalg.norm(d, axis=-1, keepdims=True)
-            origins = np.broadcast_to(geom.source[k], pix.shape)
+            if parallel:
+                d = np.broadcast_to(geom.ray[k] /
+                                    np.linalg.norm(geom.ray[k]), pix.shape)
+                # line_integrals measures the whole chord, so any origin on
+                # the ray will do.
+                origins = pix
+            else:
+                d = pix - geom.source[k]
+                d /= np.linalg.norm(d, axis=-1, keepdims=True)
+                origins = np.broadcast_to(geom.source[k], pix.shape)
             out[k] = self.line_integrals(origins, d)
         return out

@@ -2,7 +2,7 @@
 # This source file is part of the Tomviz project, https://tomviz.org/.
 # It is released under the 3-Clause BSD License, see "LICENSE".
 ###############################################################################
-"""Cone-beam acquisition and volume geometry.
+"""Cone- and parallel-beam acquisition geometry, and volume geometry.
 
 Coordinates
 -----------
@@ -24,7 +24,12 @@ along ``det_v`` (roughly parallel to the rotation axis), index ``u`` runs
 along ``det_u``. Detector index ``(n - 1) / 2`` is the detector centre.
 
 Volumes are stored as ``(n_z, n_y, n_x)`` arrays, ``z`` along the rotation
-axis, with the volume centred on the origin.
+axis, centred on the origin unless a ``center`` is given.
+
+Parallel-beam geometries (``ParallelGeometry``) use the same conventions
+with a ray direction in place of the source, like ASTRA's
+``parallel3d_vec``. Both kinds provide ``projection_matrices()``, which is
+all the backprojectors need.
 """
 
 from dataclasses import dataclass, field
@@ -35,10 +40,11 @@ import numpy as np
 
 @dataclass
 class VolumeGeometry:
-    """A box of voxels centred on the origin."""
+    """A box of voxels, centred on the origin unless center is given."""
 
     shape: tuple  # (n_z, n_y, n_x)
     voxel_size: tuple  # (dz, dy, dx), physical units
+    center: tuple = (0.0, 0.0, 0.0)  # (z, y, x) of the box centre
 
     def __post_init__(self):
         self.shape = tuple(int(n) for n in self.shape)
@@ -49,11 +55,15 @@ class VolumeGeometry:
             raise ValueError(f'Invalid volume shape {self.shape}')
         if len(self.voxel_size) != 3 or min(self.voxel_size) <= 0:
             raise ValueError(f'Invalid voxel size {self.voxel_size}')
+        self.center = tuple(float(c) for c in self.center)
+        if len(self.center) != 3:
+            raise ValueError(f'Invalid volume centre {self.center}')
 
     def axis_coords(self, axis):
         """World coordinates of voxel centres along one array axis."""
         n = self.shape[axis]
-        return (np.arange(n) - (n - 1) / 2) * self.voxel_size[axis]
+        return ((np.arange(n) - (n - 1) / 2) * self.voxel_size[axis] +
+                self.center[axis])
 
     def z_coords(self):
         return self.axis_coords(0)
@@ -72,7 +82,9 @@ class VolumeGeometry:
         zs = ((z0 - nz / 2) * dz, (z1 - nz / 2) * dz)
         ys = (-ny * dy / 2, ny * dy / 2)
         xs = (-nx * dx / 2, nx * dx / 2)
-        return np.array([[x, y, z] for z in zs for y in ys for x in xs])
+        cz, cy, cx = self.center
+        return np.array([[x + cx, y + cy, z + cz]
+                         for z in zs for y in ys for x in xs])
 
 
 @dataclass
@@ -273,3 +285,111 @@ class ConeGeometry:
             nz = max(1, int(round(self.n_v * pv / mag / voxel_size)))
             shape = (nz, nxy, nxy)
         return VolumeGeometry(shape, voxel_size)
+
+
+@dataclass
+class ParallelGeometry:
+    """Per-projection parallel-beam geometry, ASTRA ``parallel3d_vec``
+    layout: ray direction, detector centre, u step, v step."""
+
+    ray: np.ndarray  # (n_angles, 3), direction the X-rays travel
+    det_center: np.ndarray  # (n_angles, 3)
+    det_u: np.ndarray  # (n_angles, 3), one column step
+    det_v: np.ndarray  # (n_angles, 3), one row step
+    n_u: int
+    n_v: int
+
+    def __post_init__(self):
+        for name in ('ray', 'det_center', 'det_u', 'det_v'):
+            v = np.asarray(getattr(self, name), dtype=np.float64)
+            if v.ndim != 2 or v.shape[1] != 3:
+                raise ValueError(f'{name} must have shape (n_angles, 3)')
+            setattr(self, name, v)
+        n = len(self.ray)
+        if n < 1:
+            raise ValueError('Need at least one projection')
+        for name in ('det_center', 'det_u', 'det_v'):
+            if len(getattr(self, name)) != n:
+                raise ValueError(f'{name} has a different number of '
+                                 'projections from ray')
+        self.n_u = int(self.n_u)
+        self.n_v = int(self.n_v)
+        if self.n_u < 1 or self.n_v < 1:
+            raise ValueError('Detector must have at least one pixel')
+        det_n = np.cross(self.det_u, self.det_v)
+        if np.any(np.einsum('ij,ij->i', det_n, self.ray) == 0):
+            raise ValueError('Rays must not run parallel to the detector, '
+                             'and det_u, det_v must not be parallel')
+
+    @classmethod
+    def circular(cls, angles_deg, pixel_u, pixel_v, n_u, n_v, offset_u=0.0,
+                 offset_v=0.0, clockwise=False):
+        """Rotation about the z axis, with the same angle convention as
+        ConeGeometry.circular: at angle 0 the rays travel along -x and
+        det_u points along +y.
+
+        offset_u, offset_v: where the rotation axis projects onto the
+            detector, in pixels from the detector centre.
+        """
+        if not pixel_u > 0 or not pixel_v > 0:
+            raise ValueError('Pixel pitch must be positive')
+        beta = np.deg2rad(np.asarray(angles_deg, dtype=np.float64).ravel())
+        if clockwise:
+            beta = -beta
+        c, s = np.cos(beta), np.sin(beta)
+        zero = np.zeros_like(beta)
+        e_s = np.stack([c, s, zero], axis=1)
+        e_u = np.stack([-s, c, zero], axis=1)
+        e_v = np.tile([0.0, 0.0, 1.0], (len(beta), 1))
+        det_center = -offset_u * pixel_u * e_u - offset_v * pixel_v * e_v
+        return cls(-e_s, det_center, pixel_u * e_u, pixel_v * e_v, n_u, n_v)
+
+    @classmethod
+    def from_astra_vectors(cls, vectors, n_u, n_v):
+        """From an ASTRA ``parallel3d_vec`` array of shape (n_angles, 12):
+        ray direction, detector centre, u step, v step."""
+        v = np.asarray(vectors, dtype=np.float64)
+        if v.ndim != 2 or v.shape[1] != 12:
+            raise ValueError('ASTRA vectors must have shape (n_angles, 12)')
+        return cls(v[:, 0:3], v[:, 3:6], v[:, 6:9], v[:, 9:12], n_u, n_v)
+
+    @property
+    def n_angles(self):
+        return len(self.ray)
+
+    @property
+    def detector_shape(self):
+        return (self.n_v, self.n_u)
+
+    def pixel_positions(self, k):
+        """World positions of the centres of every pixel of projection k,
+        shape (n_v, n_u, 3)."""
+        iu = np.arange(self.n_u) - (self.n_u - 1) / 2
+        iv = np.arange(self.n_v) - (self.n_v - 1) / 2
+        return (self.det_center[k] +
+                iu[None, :, None] * self.det_u[k] +
+                iv[:, None, None] * self.det_v[k])
+
+    def projection_matrices(self):
+        """(n_angles, 3, 4) affine matrices P: ``h = P @ [r, 1]`` gives
+        detector index coordinates ``u = h[0]``, ``v = h[1]``, and
+        ``h[2] = 1``, so the cone-beam backprojectors apply no distance
+        weight."""
+        U, V, R = self.det_u, self.det_v, self.ray
+        # Project along the ray onto the detector plane: x - D = a U + b V
+        # + t R, solved with dual vectors orthogonal to the other two.
+        u_star = np.cross(V, R)
+        u_star /= np.einsum('ij,ij->i', U, u_star)[:, None]
+        v_star = np.cross(R, U)
+        v_star /= np.einsum('ij,ij->i', V, v_star)[:, None]
+        cu = (self.n_u - 1) / 2
+        cv = (self.n_v - 1) / 2
+        D = self.det_center
+        n = self.n_angles
+        P = np.zeros((n, 3, 4))
+        P[:, 0, :3] = u_star
+        P[:, 0, 3] = cu - np.einsum('ij,ij->i', u_star, D)
+        P[:, 1, :3] = v_star
+        P[:, 1, 3] = cv - np.einsum('ij,ij->i', v_star, D)
+        P[:, 2, 3] = 1.0
+        return P
