@@ -360,8 +360,12 @@ void ContourSink::updateColorArrayProducer()
 // for the color-by array when one is chosen
 void ContourSink::updateMapperInput()
 {
-  if (!m_contourArrayProducer->GetOutputDataObject(0)) {
-    return; // no data yet (a state restore sets properties first)
+  // No data yet (a state restore sets properties first). An empty
+  // producer still hands out a bare vtkDataObject, so check the type:
+  // running FlyingEdges on that prints a VTK error.
+  if (!vtkImageData::SafeDownCast(
+        m_contourArrayProducer->GetOutputDataObject(0))) {
+    return;
   }
   m_flyingEdges->Update();
   if (m_colorByArray) {

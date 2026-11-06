@@ -86,6 +86,8 @@
 
 #include <vector>
 
+#include <vtkObjectFactory.h>
+#include <vtkOutputWindow.h>
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
@@ -4085,6 +4087,36 @@ void recordWarning(QtMsgType type, const QMessageLogContext&,
   }
 }
 } // namespace
+
+namespace {
+// Counts VTK errors instead of printing them.
+class ErrorCountingOutputWindow : public vtkOutputWindow
+{
+public:
+  static ErrorCountingOutputWindow* New();
+  vtkTypeMacro(ErrorCountingOutputWindow, vtkOutputWindow);
+  int errors = 0;
+  void DisplayErrorText(const char*) override { ++errors; }
+};
+vtkStandardNewMacro(ErrorCountingOutputWindow);
+} // namespace
+
+TEST_F(PipelineLibTest, ContourWithoutDataRaisesNoVtkError)
+{
+  // Setting the iso value before any data arrives (a state restore or
+  // the properties panel does) ran FlyingEdges on an empty producer and
+  // printed "is of type vtkDataObject, but a vtkImageData is required".
+  vtkNew<ErrorCountingOutputWindow> counter;
+  vtkSmartPointer<vtkOutputWindow> previous = vtkOutputWindow::GetInstance();
+  vtkOutputWindow::SetInstance(counter);
+  {
+    ContourSink contour;
+    contour.setIsoValue(1.0);
+    contour.setColorByArray(true);
+  }
+  vtkOutputWindow::SetInstance(previous);
+  EXPECT_EQ(counter->errors, 0);
+}
 
 TEST_F(PipelineLibTest, UnconnectedInputIsNamedWhenRunFails)
 {
