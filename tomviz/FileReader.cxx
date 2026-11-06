@@ -11,6 +11,7 @@
 #include "GenericHDF5Format.h"
 #include "LoadDataReaction.h"
 #include "PythonReader.h"
+#include "PythonUtilities.h"
 #include "Utilities.h"
 #include "vtkOMETiffReader.h"
 
@@ -19,6 +20,7 @@
 #include <vtkMRCReader.h>
 #include <vtkNew.h>
 #include <vtkPNGReader.h>
+#include <vtkPythonInterpreter.h>
 #include <vtkSMSessionProxyManager.h>
 #include <vtkSMSourceProxy.h>
 #include <vtkSmartPointer.h>
@@ -84,13 +86,75 @@ vtkSmartPointer<vtkImageData> readWithVTK(const QStringList& fileNames)
     reader->Update();
     return reader->GetOutput();
   }
-  if (ext == "mrc") {
-    auto reader = vtkSmartPointer<vtkMRCReader>::New();
-    reader->SetFileName(path.c_str());
-    reader->Update();
-    return reader->GetOutput();
-  }
   return nullptr;
+}
+
+/// File extensions of MRC stacks and volumes (IMOD's names included).
+bool isMrc(const QString& suffix)
+{
+  static const QStringList mrc = { "mrc", "mrcs", "st",
+                                   "ali", "preali", "rec" };
+  return mrc.contains(suffix);
+}
+
+/// Tilt angles for an MRC tilt series, from its extended header or the
+/// IMOD/SerialEM files next to it (tomviz.io.mrc_tilts), or none.
+QVector<double> mrcTiltAngles(const QString& fileName, int count)
+{
+  QVector<double> angles;
+  if (!vtkPythonInterpreter::IsInitialized()) {
+    return angles;
+  }
+  Python python;
+  auto module = python.import("tomviz.io.mrc_tilts");
+  if (!module.isValid()) {
+    return angles;
+  }
+  auto function = module.findFunction("tilt_angles");
+  if (!function.isValid()) {
+    return angles;
+  }
+  Python::Tuple args(2);
+  Python::Object file(fileName);
+  args.set(0, file);
+  args.set(1, Variant(count));
+  auto res = function.call(args);
+  if (!res.isValid() || !res.isList()) {
+    Python::checkForPythonError();
+    return angles;
+  }
+  auto list = res.toList();
+  for (int i = 0; i < list.length(); ++i) {
+    angles.append(list[i].toDouble());
+  }
+  return angles;
+}
+
+/// An MRC file: the image (spacing converted from the Angstrom MRC uses to
+/// the nanometres Tomviz uses) and, for a tilt series, its angles.
+ReadResult readMrc(const QString& fileName)
+{
+  ReadResult result;
+  auto reader = vtkSmartPointer<vtkMRCReader>::New();
+  reader->SetFileName(fileName.toLocal8Bit().constData());
+  reader->Update();
+  vtkSmartPointer<vtkImageData> image = reader->GetOutput();
+  if (!image || image->GetNumberOfPoints() == 0) {
+    return result;
+  }
+  double spacing[3];
+  image->GetSpacing(spacing);
+  image->SetSpacing(spacing[0] * 0.1, spacing[1] * 0.1, spacing[2] * 0.1);
+  result.imageData = image;
+  int dims[3];
+  image->GetDimensions(dims);
+  // IMOD's .rec is a reconstructed volume; it often sits next to the
+  // .rawtlt of its tilt series, so do not look for angles for it.
+  const bool volume = QFileInfo(fileName).suffix().toLower() == "rec";
+  if (dims[2] > 1 && !volume) {
+    result.tiltAngles = mrcTiltAngles(fileName, dims[2]);
+  }
+  return result;
 }
 
 QVariantMap hdf5OptionsFromJson(const QJsonObject& options)
@@ -221,10 +285,14 @@ ReadResult readAllParts(const QStringList& fileNames,
     return result;
   }
 
+  // MRC stacks and volumes, with tilt angles when they are a tilt series.
+  if (isMrc(suffix)) {
+    return readMrc(fileName);
+  }
+
   // Simple VTK-readable formats — direct, no dialog.
   if (suffix == "tif" || suffix == "tiff" || suffix == "png" ||
-      suffix == "jpg" || suffix == "jpeg" || suffix == "vti" ||
-      suffix == "mrc") {
+      suffix == "jpg" || suffix == "jpeg" || suffix == "vti") {
     result.imageData = readWithVTK(fileNames);
     return result;
   }

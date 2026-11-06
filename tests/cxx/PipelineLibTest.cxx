@@ -1829,6 +1829,48 @@ class PlainReader:
   EXPECT_FALSE(plainParts.dark);
 }
 
+TEST_F(PipelinePythonTest, MrcTiltSeriesGetsAnglesAndNanometres)
+{
+  // An IMOD stack (.st) with its .rawtlt opens as a tilt series with
+  // nm spacing (MRC stores Angstrom); a .rec next to the same .rawtlt is
+  // a volume and gets no angles.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["folder"] = dir.path().toStdString();
+    py::exec(R"(
+import os, struct
+import numpy as np
+def write(name, nz):
+    h = bytearray(1024)
+    struct.pack_into('<4i', h, 0, 4, 3, nz, 2)
+    struct.pack_into('<3i', h, 28, 4, 3, nz)
+    struct.pack_into('<3f', h, 40, 40.0, 30.0, 10.0 * nz)
+    h[208:212] = b'MAP '
+    h[212:214] = b'\x44\x44'
+    with open(os.path.join(folder, name), 'wb') as f:
+        f.write(bytes(h) + np.ones((nz, 3, 4), '<f4').tobytes())
+write('tilts.st', 5)
+write('tilts.rec', 5)
+with open(os.path.join(folder, 'tilts.rawtlt'), 'w') as f:
+    f.write('-60\n-30\n0\n30\n60\n')
+)",
+             scope, scope);
+  }
+
+  auto st = tomviz::readImageData({ dir.filePath("tilts.st") });
+  ASSERT_TRUE(st.imageData);
+  EXPECT_EQ(st.tiltAngles, QVector<double>({ -60, -30, 0, 30, 60 }));
+  EXPECT_DOUBLE_EQ(st.imageData->GetSpacing()[0], 1.0); // 10 A = 1 nm
+
+  auto rec = tomviz::readImageData({ dir.filePath("tilts.rec") });
+  ASSERT_TRUE(rec.imageData);
+  EXPECT_TRUE(rec.tiltAngles.isEmpty());
+  EXPECT_DOUBLE_EQ(rec.imageData->GetSpacing()[0], 1.0);
+}
+
 TEST_F(PipelinePythonTest, ReaderSourceCanReadTheFlatOrDarkPart)
 {
   // Flat and dark frames open as datasets of their own; on a state load
