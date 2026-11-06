@@ -11,6 +11,7 @@
 #include "Pipeline.h"
 #include "PlaneIndexing.h"
 #include "Port.h"
+#include "SinkGroupNode.h"
 #include "data/VolumeData.h"
 #include "vtkNonOrthoImagePlaneWidget.h"
 
@@ -1106,6 +1107,53 @@ void ClipSink::onWidgetInteraction()
 
 // --- Clipping plane propagation to sibling sinks ---
 
+namespace {
+
+// The port that actually carries the data: a group's passthrough is
+// followed up to its input's source. Pipeline::linkRemoved fires while
+// the link is still attached, so the link being removed is skipped.
+OutputPort* dataPort(OutputPort* port, const Link* removed)
+{
+  while (port) {
+    auto* group = qobject_cast<SinkGroupNode*>(port->node());
+    if (!group) {
+      break;
+    }
+    int idx = group->outputPorts().indexOf(port);
+    if (idx < 0 || idx >= group->inputPorts().size() ||
+        !group->inputPorts()[idx]->link() ||
+        group->inputPorts()[idx]->link() == removed) {
+      break;
+    }
+    port = group->inputPorts()[idx]->link()->from();
+  }
+  return port;
+}
+
+// Every display fed by port, directly or through groups.
+void collectSinks(OutputPort* port, const LegacyModuleSink* self,
+                  const Link* removed, QSet<LegacyModuleSink*>& out)
+{
+  for (auto* link : port->links()) {
+    if (link == removed) {
+      continue;
+    }
+    auto* node = link->to() ? link->to()->node() : nullptr;
+    if (auto* sink = qobject_cast<LegacyModuleSink*>(node)) {
+      if (sink != self) {
+        out.insert(sink);
+      }
+    } else if (auto* group = qobject_cast<SinkGroupNode*>(node)) {
+      int idx = group->inputPorts().indexOf(link->to());
+      if (idx >= 0 && idx < group->outputPorts().size()) {
+        collectSinks(group->outputPorts()[idx], self, removed, out);
+      }
+    }
+  }
+}
+
+} // namespace
+
 void ClipSink::onInputConnectionChanged()
 {
   disconnectFromSiblings();
@@ -1125,12 +1173,7 @@ void ClipSink::connectToSiblings()
     return;
   }
 
-  for (auto* sink : siblingSinks("volume")) {
-    m_clippedSinks.insert(sink);
-    if (visibility()) {
-      sink->addClippingPlane(m_clippingPlane);
-    }
-  }
+  refreshClippedSinks();
 
   auto* pip = qobject_cast<Pipeline*>(parent());
   if (pip) {
@@ -1158,30 +1201,33 @@ void ClipSink::disconnectFromSiblings()
   }
 }
 
-void ClipSink::onPipelineLinkCreated(Link* link)
+void ClipSink::refreshClippedSinks(const Link* removed)
 {
-  if (!link || link->from() != m_upstreamPort) {
-    return;
+  // Clip every display of the same data, whether it hangs off the data
+  // port itself or sits in a Visualizations group, on either side.
+  QSet<LegacyModuleSink*> wanted;
+  if (auto* port = dataPort(m_upstreamPort, removed)) {
+    collectSinks(port, this, removed, wanted);
   }
-  auto* sink = qobject_cast<LegacyModuleSink*>(link->to()->node());
-  if (sink && sink != this && !m_clippedSinks.contains(sink)) {
-    m_clippedSinks.insert(sink);
+  for (auto* sink : m_clippedSinks - wanted) {
+    sink->removeClippingPlane(m_clippingPlane);
+  }
+  for (auto* sink : wanted - m_clippedSinks) {
     if (visibility()) {
       sink->addClippingPlane(m_clippingPlane);
     }
   }
+  m_clippedSinks = wanted;
+}
+
+void ClipSink::onPipelineLinkCreated(Link*)
+{
+  refreshClippedSinks();
 }
 
 void ClipSink::onPipelineLinkRemoved(Link* link)
 {
-  if (!link || link->from() != m_upstreamPort) {
-    return;
-  }
-  auto* sink = qobject_cast<LegacyModuleSink*>(link->to()->node());
-  if (sink && m_clippedSinks.contains(sink)) {
-    sink->removeClippingPlane(m_clippingPlane);
-    m_clippedSinks.remove(sink);
-  }
+  refreshClippedSinks(link);
 }
 
 void ClipSink::onMetadataChanged()

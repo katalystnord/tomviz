@@ -4065,6 +4065,65 @@ TEST_F(PipelineLibTest, ClipSinkLinkingPropagatesToLinkedPeers)
   EXPECT_EQ(b->direction(), ClipSink::XZ);
 }
 
+namespace {
+// Counts the clipping planes a Clip hands it.
+struct PlaneCountingSink : OutlineSink
+{
+  int planes = 0;
+  void addClippingPlane(vtkPlane*) override { ++planes; }
+  void removeClippingPlane(vtkPlane*) override { --planes; }
+};
+} // namespace
+
+TEST_F(PipelineLibTest, ClipSinkCutsDisplaysInAndOutsideGroups)
+{
+  // A Clip cuts every display of the same data: those attached directly
+  // and those in a Visualizations group, whichever side the Clip is on.
+  auto* source = new SphereSource();
+  source->setDimensions(8, 8, 8);
+  pipeline->addNode(source);
+  auto* group = new SinkGroupNode();
+  group->addPassthrough("data", PortType::ImageData);
+  pipeline->addNode(group);
+  pipeline->createLink(source->outputPort("volume"),
+                       group->inputPort("data"));
+
+  auto* direct = new PlaneCountingSink();
+  auto* grouped = new PlaneCountingSink();
+  auto* clip = new ClipSink();
+  pipeline->addNode(direct);
+  pipeline->addNode(grouped);
+  pipeline->addNode(clip);
+  pipeline->createLink(source->outputPort("volume"),
+                       direct->inputPort("volume"));
+  pipeline->createLink(group->outputPort("data"),
+                       grouped->inputPort("volume"));
+  pipeline->createLink(group->outputPort("data"), clip->inputPort("volume"));
+  EXPECT_EQ(direct->planes, 1);
+  EXPECT_EQ(grouped->planes, 1);
+
+  // A display that joins later is cut too, and one that leaves is not.
+  auto* late = new PlaneCountingSink();
+  pipeline->addNode(late);
+  pipeline->createLink(source->outputPort("volume"),
+                       late->inputPort("volume"));
+  EXPECT_EQ(late->planes, 1);
+  pipeline->removeLink(direct->inputPort("volume")->link());
+  EXPECT_EQ(direct->planes, 0);
+
+  // Hiding the Clip takes its plane away everywhere, showing it restores.
+  clip->setVisibility(false);
+  EXPECT_EQ(grouped->planes, 0);
+  EXPECT_EQ(late->planes, 0);
+  clip->setVisibility(true);
+  EXPECT_EQ(grouped->planes, 1);
+
+  // Disconnecting the Clip releases them all.
+  pipeline->removeLink(clip->inputPort("volume")->link());
+  EXPECT_EQ(grouped->planes, 0);
+  EXPECT_EQ(late->planes, 0);
+}
+
 TEST_F(PipelineLibTest, SinkLinkFlagSurvivesSerialization)
 {
   SliceSink slice;
