@@ -145,8 +145,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (abs(rz) > 1e-9) {
             let pa = oa + (f32(params.own0) - oc) / rz;
             let pb = oa + (f32(params.own1) - oc) / rz;
-            p_lo = max(p_lo, i32(floor(min(pa, pb))) - 1);
-            p_hi = min(p_hi, i32(ceil(max(pa, pb))) + 1);
+            // Clamp in float before converting: for a ray almost parallel
+            // to the slab, pa and pb can exceed the i32 range, and drivers
+            // differ in how they convert that (RADV saturates, so the + 1
+            // wrapped and the ray was dropped). The per-sample ownership
+            // test below keeps the result exact either way.
+            let lim = f32(na);
+            p_lo = max(p_lo, i32(clamp(floor(min(pa, pb)) - 1.0, -1.0, lim)));
+            p_hi = min(p_hi, i32(clamp(ceil(max(pa, pb)) + 1.0, -1.0, lim)));
         }
     }
     var acc = 0.0;

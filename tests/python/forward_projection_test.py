@@ -140,3 +140,17 @@ def test_generate_tilt_series_without_gpu_uses_original_code(monkeypatch):
     auto, _ = generate(vol, 'auto')
     cpu, _ = generate(vol, 'cpu')
     np.testing.assert_array_equal(auto, cpu)
+
+
+def test_gpu_ray_almost_parallel_to_slabs(smooth):
+    # Rays tilted by 1e-8 out of the z planes: the slab clip range is
+    # astronomically large and must not overflow when converted to int.
+    # (Found on RADV, where fused multiply-adds left such a tiny z
+    # component on rays that are exactly level in float32.)
+    be = gpu_backend()
+    _, vg, vol = smooth
+    g = ParallelGeometry.circular(np.arange(0, 180, 15.0), 0.5, 0.5, 48, 40)
+    g.ray = g.ray + np.array([0.0, 0.0, 1e-8])
+    ref = forward_project(vol, g, vg, threads=2)
+    got = be.forward_project(vol, g, vg)
+    np.testing.assert_allclose(got, ref, atol=2e-5 * abs(ref).max())
