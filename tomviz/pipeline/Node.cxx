@@ -198,6 +198,9 @@ bool Node::allInputsCurrent() const
 {
   for (auto* input : m_inputPorts) {
     if (!input->link()) {
+      if (input->isOptional()) {
+        continue;
+      }
       return false;
     }
     Node* upstream = input->link()->from()->node();

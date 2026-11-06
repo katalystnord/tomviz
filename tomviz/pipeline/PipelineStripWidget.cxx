@@ -1228,6 +1228,11 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
       return tr("Input '%1', from %2")
         .arg(inPort->name(), from ? from->label() : tr("nothing"));
     }
+    if (inPort->isOptional()) {
+      return tr("Optional input '%1', not connected: drag an output port "
+                "onto it to use it")
+        .arg(inPort->name());
+    }
     return tr("Input '%1' is not connected: drag an output port onto it")
       .arg(inPort->name());
   }
@@ -1248,7 +1253,7 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
           .contains(pos)) {
       QStringList missing;
       for (auto* input : item.node->inputPorts()) {
-        if (!input->link()) {
+        if (!input->link() && !input->isOptional()) {
           missing << QStringLiteral("'%1'").arg(input->name());
         }
       }

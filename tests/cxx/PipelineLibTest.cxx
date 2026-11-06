@@ -1527,6 +1527,31 @@ TEST_F(PipelinePythonTest, JSONParameterDefaults)
   delete transform;
 }
 
+TEST_F(PipelinePythonTest, DatasetParametersBecomeInputs)
+{
+  // Dataset parameters become input ports after the primary one;
+  // "optional": true lets one stay unconnected.
+  QString jsonStr = R"({
+    "name": "TestOp",
+    "label": "Test Operator",
+    "parameters": [
+      { "name": "flat", "type": "dataset" },
+      { "name": "dark", "type": "dataset", "optional": true }
+    ]
+  })";
+
+  auto* transform = new LegacyPythonTransform();
+  transform->setJSONDescription(jsonStr);
+
+  ASSERT_NE(transform->inputPort("flat"), nullptr);
+  ASSERT_NE(transform->inputPort("dark"), nullptr);
+  EXPECT_FALSE(transform->inputPort("volume")->isOptional());
+  EXPECT_FALSE(transform->inputPort("flat")->isOptional());
+  EXPECT_TRUE(transform->inputPort("dark")->isOptional());
+
+  delete transform;
+}
+
 TEST_F(PipelinePythonTest, IntArgumentsRoundTripAsInt)
 {
   // Regression: Qt6 collapses every JSON number into QVariant<double>,
@@ -4116,6 +4141,54 @@ TEST_F(PipelineLibTest, ContourWithoutDataRaisesNoVtkError)
   }
   vtkOutputWindow::SetInstance(previous);
   EXPECT_EQ(counter->errors, 0);
+}
+
+namespace {
+// out = a + b, with b optional (0 when not connected).
+class OptionalAddTransform : public TransformNode
+{
+public:
+  OptionalAddTransform()
+  {
+    addInput("a", PortType::ImageData);
+    addInput("b", PortType::ImageData)->setOptional(true);
+    addOutput("out", PortType::ImageData);
+  }
+
+protected:
+  QMap<QString, PortData> transform(
+    const QMap<QString, PortData>& inputs) override
+  {
+    int b = inputs["b"].isValid() ? inputs["b"].value<int>() : 0;
+    QMap<QString, PortData> result;
+    result["out"] =
+      PortData(std::any(inputs["a"].value<int>() + b), PortType::ImageData);
+    return result;
+  }
+};
+} // namespace
+
+TEST_F(PipelineLibTest, OptionalInputMayStayUnconnected)
+{
+  auto* source = new SourceNode();
+  source->addOutput("out", PortType::ImageData);
+  pipeline->addNode(source);
+  auto* add = new OptionalAddTransform();
+  pipeline->addNode(add);
+  pipeline->createLink(source->outputPort("out"), add->inputPort("a"));
+  source->setOutputData("out", PortData(std::any(10), PortType::ImageData));
+
+  auto* future = pipeline->execute();
+  EXPECT_TRUE(future->succeeded());
+  EXPECT_EQ(add->state(), NodeState::Current);
+  EXPECT_EQ(add->outputPort("out")->data().value<int>(), 10);
+  EXPECT_TRUE(add->allInputsCurrent());
+
+  // A required input left unconnected still blocks it.
+  add->inputPort("a")->setOptional(false);
+  pipeline->removeLink(add->inputPort("a")->link());
+  EXPECT_FALSE(add->allInputsCurrent());
+  EXPECT_FALSE(add->execute());
 }
 
 TEST_F(PipelineLibTest, UnconnectedInputIsNamedWhenRunFails)

@@ -80,7 +80,7 @@ bool TransformNode::execute()
 
   QStringList unconnected;
   for (auto* port : inputPorts()) {
-    if (!port->link()) {
+    if (!port->link() && !port->isOptional()) {
       unconnected << QStringLiteral("'%1'").arg(port->name());
     }
   }
@@ -93,6 +93,9 @@ bool TransformNode::execute()
     return false;
   }
   for (auto* port : inputPorts()) {
+    if (!port->link() && port->isOptional()) {
+      continue;
+    }
     if (!port->hasData()) {
       setExecState(NodeExecState::Failed);
       return false;

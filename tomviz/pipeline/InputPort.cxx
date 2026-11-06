@@ -82,5 +82,15 @@ void InputPort::setLink(Link* link)
   emit connectionChanged();
 }
 
+bool InputPort::isOptional() const
+{
+  return m_optional;
+}
+
+void InputPort::setOptional(bool optional)
+{
+  m_optional = optional;
+}
+
 } // namespace pipeline
 } // namespace tomviz
