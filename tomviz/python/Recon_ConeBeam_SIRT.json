@@ -126,7 +126,7 @@
     },
     {
       "name": "volume_size_xy",
-      "label": "Volume Size Across the Axis (voxels)",
+      "label": "Volume Size Across the Axis (voxels, 0 = automatic)",
       "description": "Voxels in y and z. 0 covers the field of view.",
       "type": "int",
       "default": 0,
@@ -135,7 +135,7 @@
     },
     {
       "name": "volume_size_axial",
-      "label": "Volume Size Along the Axis (voxels)",
+      "label": "Volume Size Along the Axis (voxels, 0 = automatic)",
       "description": "Voxels in x. 0 covers the field of view.",
       "type": "int",
       "default": 0,
@@ -144,7 +144,7 @@
     },
     {
       "name": "voxel_size",
-      "label": "Voxel Size",
+      "label": "Voxel Size (0 = automatic)",
       "description": "0 uses the detector pixel size divided by the magnification.",
       "type": "double",
       "default": 0.0,
