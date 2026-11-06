@@ -582,6 +582,7 @@ set(python_files
   Recon_DFT_constraint.py
   Recon_WBP.py
   Recon_ConeBeam_FDK.py
+  Recon_ConeBeam_SIRT.py
   FlatDarkCorrection.py
   IntensityToLineIntegrals.py
   Recon_ART.py
@@ -700,6 +701,7 @@ set(json_files
   Recon_SIRT.json
   Recon_WBP.json
   Recon_ConeBeam_FDK.json
+  Recon_ConeBeam_SIRT.json
   FlatDarkCorrection.json
   IntensityToLineIntegrals.json
   Shift3D.json
@@ -893,6 +895,7 @@ set(tomviz_python_projectors_modules
   forward_cpu.py
   geometry.py
   phantom.py
+  sirt.py
   webgpu.py
 )
 
@@ -907,6 +910,7 @@ set(tomviz_python_conebeam_modules
   __init__.py
   fdk.py
   filtering.py
+  operator_support.py
   preprocess.py
 )
 

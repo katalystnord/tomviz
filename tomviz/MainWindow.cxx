@@ -782,6 +782,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
   reconstructionMenu->addSeparator();
   QAction* reconConeBeamFDKAction =
     reconstructionMenu->addAction("Cone-Beam FDK (X-ray CT)");
+  QAction* reconConeBeamSIRTAction =
+    reconstructionMenu->addAction("Cone-Beam SIRT (X-ray CT)");
 
   // === Simulation submenu ===
   QMenu* simulationMenu =
@@ -900,6 +902,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
                                  "Reconstruct (Cone-Beam FDK)",
                                  readInPythonScript("Recon_ConeBeam_FDK"),
                                  readInJSONDescription("Recon_ConeBeam_FDK"));
+  new AddPythonTransformReaction(reconConeBeamSIRTAction,
+                                 "Reconstruct (Cone-Beam SIRT)",
+                                 readInPythonScript("Recon_ConeBeam_SIRT"),
+                                 readInJSONDescription("Recon_ConeBeam_SIRT"));
 
   new ReconstructionReaction(reconWBP_CAction);
 
