@@ -1,0 +1,35 @@
+{
+  "name": "RemoveRingArtifacts",
+  "label": "Remove Ring Artifacts",
+  "description": "Remove ring artifacts before reconstruction. Detector pixels that respond slightly differently from their neighbours leave stripes in the projections, which reconstruct as rings around the rotation axis. Stripes are removed with the filtering method of Vo, Atwood and Drakopoulos (Opt. Express 26:28396, 2018), and pixels that do not respond at all are interpolated from their neighbours. Apply it to line integrals, after flat/dark correction and -log. Works for parallel-beam and cone-beam data, with the tilt axis along x.",
+  "parameters": [
+    {
+      "name": "size",
+      "label": "Filter Width (pixels)",
+      "description": "Median width across the tilt axis. Wider removes wider stripes but starts to alter real structure. 0 uses 1% of the detector width, at least 5 pixels.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 501
+    },
+    {
+      "name": "sigma",
+      "label": "Smoothing Over Angle",
+      "description": "Width of the low-pass over angle that separates stripes from the object, in frequency samples. 3 to 10 is typical.",
+      "type": "double",
+      "default": 3.0,
+      "minimum": 0.5,
+      "maximum": 50.0,
+      "precision": 1
+    },
+    {
+      "name": "dead_pixels",
+      "label": "Repair Dead Pixels",
+      "description": "Interpolate across pixels that do not respond (their values hardly change over the whole scan while their neighbours' do).",
+      "type": "bool",
+      "default": true
+    }
+  ],
+  "inputType": "TiltSeries",
+  "outputType": "TiltSeries"
+}

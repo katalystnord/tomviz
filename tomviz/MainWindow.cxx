@@ -740,6 +740,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("Flat/Dark Field Correction (X-ray)");
   QAction* intensityToLineIntegralsAction =
     preprocessingMenu->addAction("Intensity to Line Integrals (-log)");
+  QAction* removeRingArtifactsAction =
+    preprocessingMenu->addAction("Remove Ring Artifacts");
 
   // === Alignment submenu ===
   QMenu* alignmentMenu = m_ui->menuTomography->addMenu("Alignment");
@@ -842,6 +844,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     intensityToLineIntegralsAction, "Intensity to Line Integrals",
     readInPythonScript("IntensityToLineIntegrals"),
     readInJSONDescription("IntensityToLineIntegrals"));
+  new AddPythonTransformReaction(removeRingArtifactsAction,
+                                 "Remove Ring Artifacts",
+                                 readInPythonScript("RemoveRingArtifacts"),
+                                 readInJSONDescription("RemoveRingArtifacts"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),

@@ -585,6 +585,7 @@ set(python_files
   Recon_ConeBeam_SIRT.py
   FlatDarkCorrection.py
   IntensityToLineIntegrals.py
+  RemoveRingArtifacts.py
   Recon_ART.py
   Recon_SIRT.py
   Recon_TV_minimization.py
@@ -704,6 +705,7 @@ set(json_files
   Recon_ConeBeam_SIRT.json
   FlatDarkCorrection.json
   IntensityToLineIntegrals.json
+  RemoveRingArtifacts.json
   Shift3D.json
   ShiftTiltSeriesRandomly.json
   SwapAxes.json
@@ -912,6 +914,7 @@ set(tomviz_python_conebeam_modules
   filtering.py
   operator_support.py
   preprocess.py
+  rings.py
 )
 
 file(MAKE_DIRECTORY "${tomviz_python_binary_dir}/tomviz/conebeam")
