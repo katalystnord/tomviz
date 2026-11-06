@@ -130,6 +130,47 @@ QVector<double> mrcTiltAngles(const QString& fileName, int count)
   return angles;
 }
 
+/// A NeXus NXtomo file (tomviz.io.formats.nxtomo): projections with
+/// angles, plus flat and dark frames. False when the file is not NXtomo
+/// (or Python is not running), so other HDF5 readers can try.
+bool readNxtomo(const QString& fileName, ReadResult& result)
+{
+  if (!vtkPythonInterpreter::IsInitialized()) {
+    return false;
+  }
+  Python python;
+  auto module = python.import("tomviz.io.formats.nxtomo");
+  if (!module.isValid()) {
+    return false;
+  }
+  auto check = module.findFunction("is_nxtomo");
+  if (!check.isValid()) {
+    return false;
+  }
+  Python::Tuple args(1);
+  Python::Object file(fileName);
+  args.set(0, file);
+  auto isNxtomo = check.call(args);
+  if (!isNxtomo.isValid() || !isNxtomo.toBool()) {
+    Python::checkForPythonError();
+    return false;
+  }
+  auto cls = module.findFunction("NXtomoReader");
+  auto instance = cls.isValid() ? cls.call() : Python::Object();
+  if (!instance.isValid()) {
+    Python::checkForPythonError();
+    return false;
+  }
+  auto parts = PythonReader(instance).readAll(fileName);
+  if (!parts.data) {
+    return false;
+  }
+  result.imageData = parts.data;
+  result.darkData = parts.dark;
+  result.whiteData = parts.flat;
+  return true;
+}
+
 /// An MRC file: the image (spacing converted from the Angstrom MRC uses to
 /// the nanometres Tomviz uses) and, for a tilt series, its angles.
 ReadResult readMrc(const QString& fileName)
@@ -239,9 +280,13 @@ ReadResult readAllParts(const QStringList& fileNames,
 
   // .hspy / .h5 / .nxs — DataExchange / FXI / generic HDF5. NeXus
   // files are HDF5 underneath, so they go through the same readers.
-  if (suffix == "hspy" || suffix == "h5" || suffix == "nxs") {
+  if (suffix == "hspy" || suffix == "h5" || suffix == "nxs" ||
+      suffix == "nx") {
     QVariantMap hdf5Options = hdf5OptionsFromJson(options);
     const auto fnStd = fileName.toStdString();
+    if (readNxtomo(fileName, result)) {
+      return result;
+    }
     if (GenericHDF5Format::isDataExchange(fnStd)) {
       DataExchangeFormat format;
       auto r = format.readAll(fileName.toLatin1().data(), hdf5Options);

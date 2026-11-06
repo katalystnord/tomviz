@@ -177,14 +177,14 @@ pipeline::SourceNode* LoadDataReaction::createSourceFromImageData(
 QList<pipeline::SourceNode*> LoadDataReaction::loadData(bool isTimeSeries)
 {
   QStringList filters;
-  filters << "Common file types (*.emd *.jpg *.jpeg *.png *.tiff *.tif *.h5 "
+  filters << "Common file types (*.emd *.jpg *.jpeg *.png *.tiff *.tif *.h5 *.nx "
              "*.hspy *.nxs *.raw *.dat *.bin *.txt *.mhd *.mha *.vti *.mrc "
              "*.mrcs *.st *.rec *.ali *.preali *.xmf *.xdmf *.npy *.mat *.dcm)"
           << "EMD (*.emd)"
           << "JPeg Image files (*.jpg *.jpeg)"
           << "PNG Image files (*.png)"
           << "TIFF Image files (*.tiff *.tif)"
-          << "HDF5 files (*.h5 *.hspy *.nxs)"
+          << "HDF5 files (*.h5 *.hspy *.nxs *.nx)"
           << "OME-TIFF Image files (*.ome.tif)"
           << "Raw data files (*.raw *.dat *.bin)"
           << "Meta Image files (*.mhd *.mha)"

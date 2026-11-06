@@ -1871,6 +1871,45 @@ with open(os.path.join(folder, 'tilts.rawtlt'), 'w') as f:
   EXPECT_DOUBLE_EQ(rec.imageData->GetSpacing()[0], 1.0);
 }
 
+TEST_F(PipelinePythonTest, NxtomoFileSplitsProjectionsFlatsAndDarks)
+{
+  // .nxs files are HDF5; an NXtomo one is recognised before the generic
+  // HDF5 reader and split by image_key into projections, flats, darks.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("scan.nxs");
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["path"] = path.toStdString();
+    py::exec(R"(
+import h5py
+import numpy as np
+keys = np.array([2, 1, 1, 0, 0, 0])
+with h5py.File(path, 'w') as f:
+    g = f.create_group('entry1/tomo_entry')
+    g['definition'] = b'NXtomo'
+    g['instrument/detector/data'] = np.stack(
+        [np.full((3, 4), 5 * k + 1, np.uint16) for k in keys])
+    g['instrument/detector/image_key'] = keys
+    g['sample/rotation_angle'] = np.array([0, 0, 0, 0, 60, 120.0])
+)",
+             scope, scope);
+  }
+  auto all = tomviz::readImageData({ path });
+  ASSERT_TRUE(all.imageData);
+  int dims[3];
+  all.imageData->GetDimensions(dims);
+  EXPECT_EQ(dims[2], 3);
+  EXPECT_EQ(VolumeData::getTiltAngles(all.imageData),
+            QVector<double>({ 0, 60, 120 }));
+  ASSERT_TRUE(all.whiteData);
+  ASSERT_TRUE(all.darkData);
+  all.whiteData->GetDimensions(dims);
+  EXPECT_EQ(dims[2], 2);
+  EXPECT_EQ(all.darkData->GetScalarRange()[1], 11.0);
+}
+
 TEST_F(PipelinePythonTest, ReaderSourceCanReadTheFlatOrDarkPart)
 {
   // Flat and dark frames open as datasets of their own; on a state load

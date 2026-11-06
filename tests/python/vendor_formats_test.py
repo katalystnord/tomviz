@@ -253,3 +253,63 @@ def test_zeiss_real_scan():
     assert len(ds.metadata['geometry']['vectors']) == n
     flat = _boundary.wrap_vtk_image(result['flat'], legacy=True)
     assert flat.active_scalars.shape[:2] == ds.active_scalars.shape[:2]
+
+
+# -- NeXus NXtomo -------------------------------------------------------------
+
+def write_nxtomo(path, entry='entry1/tomo_entry', angle_units='degree',
+                 pixel=None):
+    h5py = pytest.importorskip('h5py')
+    keys = np.array([2, 1, 0, 0, 0, 0, 3, 1])  # dark, flat, 4 views, junk
+    data = np.stack([np.full((ROWS, COLS), 10 * k + i, np.uint16)
+                     for i, k in enumerate(keys)])
+    angles = np.array([0, 0, 0, 45, 90, 135, 135, 135], float)
+    if angle_units == 'rad':
+        angles = np.radians(angles)
+    with h5py.File(path, 'w') as f:
+        g = f.create_group(entry)
+        g['definition'] = b'NXtomo'
+        g['instrument/detector/data'] = data
+        g['instrument/detector/image_key'] = keys
+        a = g.create_dataset('sample/rotation_angle', data=angles)
+        a.attrs['units'] = angle_units
+        if pixel:
+            p = g.create_dataset('instrument/detector/x_pixel_size',
+                                 data=pixel)
+            p.attrs['units'] = 'm'
+    return str(path)
+
+
+def test_nxtomo_diamond_layout(tmp_path):
+    from tomviz.io.formats.nxtomo import NXtomoReader, is_nxtomo
+    path = write_nxtomo(tmp_path / 'scan.nxs')
+    assert is_nxtomo(path)
+    result = NXtomoReader().read(path)
+    ds = wrap(result)
+    assert ds.active_scalars.shape == (ROWS, COLS, 4)
+    np.testing.assert_allclose(ds.tilt_angles, [0, 45, 90, 135])
+    assert ds.active_scalars[0, 0, 0] == 2   # frame 2 is the first view
+    flat = _boundary.wrap_vtk_image(result['flat'], legacy=True)
+    dark = _boundary.wrap_vtk_image(result['dark'], legacy=True)
+    assert flat.active_scalars.shape == (ROWS, COLS, 2)
+    assert dark.active_scalars.shape == (ROWS, COLS, 1)
+
+
+def test_nxtomo_esrf_layout_radians_and_pixel_size(tmp_path):
+    from tomviz.io.formats.nxtomo import NXtomoReader
+    path = write_nxtomo(tmp_path / 'scan.nx', entry='entry0000',
+                        angle_units='rad', pixel=6.5e-6)
+    ds = wrap(NXtomoReader().read(path))
+    np.testing.assert_allclose(ds.tilt_angles, [0, 45, 90, 135])
+    assert ds.spacing[0] == pytest.approx(0.0065)
+    assert ds.metadata['nxtomo']['entry'] == 'entry0000'
+
+
+def test_other_hdf5_is_not_nxtomo(tmp_path):
+    h5py = pytest.importorskip('h5py')
+    from tomviz.io.formats.nxtomo import is_nxtomo
+    with h5py.File(tmp_path / 'x.h5', 'w') as f:
+        f['/exchange/data'] = np.zeros((2, 2, 2))
+    assert not is_nxtomo(str(tmp_path / 'x.h5'))
+    (tmp_path / 'not.h5').write_text('text')
+    assert not is_nxtomo(str(tmp_path / 'not.h5'))
