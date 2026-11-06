@@ -34,6 +34,7 @@ import tifffile
 
 from tomviz.projectors import ConeGeometry, VolumeGeometry
 from tomviz.conebeam import fdk, flat_dark_correct
+from tomviz.projectors.sirt import sirt
 
 
 def bin2d(a, b):
@@ -83,6 +84,9 @@ def main():
     ap.add_argument('--step', type=int, default=2,
                     help='use every n-th projection')
     ap.add_argument('--backend', default='cpu')
+    ap.add_argument('--method', default='fdk', choices=('fdk', 'sirt'))
+    ap.add_argument('--iterations', type=int, default=100,
+                    help='SIRT iterations')
     ap.add_argument('--threads', type=int, default=None)
     ap.add_argument('--png', help='write a comparison image here')
     ap.add_argument('--save', help='save the reconstruction (.npy) here')
@@ -99,8 +103,12 @@ def main():
     vg = VolumeGeometry((n, n, n), 0.1 * args.bin)
     t1 = time.perf_counter()
     det_shape = line.shape[1:]
-    rec = fdk(line, g, vg, backend=args.backend, threads=args.threads,
-              log=print, overwrite=True)
+    if args.method == 'fdk':
+        rec = fdk(line, g, vg, backend=args.backend, threads=args.threads,
+                  log=print, overwrite=True)
+    else:
+        rec = sirt(line, g, vg, iterations=args.iterations,
+                   backend=args.backend, log=print)
     del line
     t2 = time.perf_counter()
     rec = np.flip(rec, 2)  # reference x axis convention, see docstring
@@ -110,7 +118,8 @@ def main():
     rmse = np.sqrt(np.mean((rec - ref) ** 2))
     print(f'{g.n_angles} projections of {det_shape[0]}x{det_shape[1]}, '
           f'volume {vg.shape} at {vg.voxel_size[0]} mm')
-    print(f'load + correct {t1 - t0:.1f} s, FDK {t2 - t1:.1f} s')
+    print(f'load + correct {t1 - t0:.1f} s, {args.method.upper()} '
+          f'{t2 - t1:.1f} s')
     print(f'vs reference: correlation {corr:.4f}, slope {slope:.4f}, '
           f'offset {offset:.5f}, RMSE {rmse:.5f} '
           f'(reference std {ref.std():.5f})')
