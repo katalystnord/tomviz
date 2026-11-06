@@ -36,7 +36,15 @@ def create_reader_instance(reader_class):
 
 
 def execute_reader(obj, path):
-    return obj.read(path)
+    """Run a reader. Returns [[name, image], ...] for the parts it gave:
+    'data', then 'dark' and 'flat' if present. Readers may return a
+    vtkImageData, or a dict with 'data' and optional 'dark' and 'flat'
+    images (see tomviz.io)."""
+    result = obj.read(path)
+    if not isinstance(result, dict):
+        result = {'data': result}
+    return [[name, result[name]] for name in ('data', 'dark', 'flat')
+            if result.get(name) is not None]
 
 
 def list_python_writers():

@@ -14,12 +14,23 @@
 class vtkImageData;
 
 namespace tomviz {
+
+/// What a Python reader returned: the data, plus flat (white) and dark
+/// reference frames when the format carries them.
+struct PythonReadResult
+{
+  vtkSmartPointer<vtkImageData> data;
+  vtkSmartPointer<vtkImageData> dark;
+  vtkSmartPointer<vtkImageData> flat;
+};
+
 class PythonReader
 {
 public:
   PythonReader(Python::Object);
   PythonReader();
   vtkSmartPointer<vtkImageData> read(QString);
+  PythonReadResult readAll(QString);
 
 private:
   Python::Object m_instance;

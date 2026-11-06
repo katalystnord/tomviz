@@ -110,7 +110,31 @@ QVariantMap hdf5OptionsFromJson(const QJsonObject& options)
 
 } // namespace
 
+namespace {
+ReadResult readAllParts(const QStringList& fileNames,
+                        const QJsonObject& options);
+} // namespace
+
 ReadResult readImageData(const QStringList& fileNames,
+                         const QJsonObject& options)
+{
+  ReadResult result = readAllParts(fileNames, options);
+  // options["part"] picks a file's flat or dark frames instead of its
+  // data, so those can be datasets of their own that re-read themselves.
+  const QString part = options.value("part").toString();
+  if (part.isEmpty() || part == QLatin1String("data")) {
+    return result;
+  }
+  ReadResult partResult;
+  partResult.imageData =
+    part == QLatin1String("flat") ? result.whiteData : result.darkData;
+  partResult.readerProperties = result.readerProperties;
+  return partResult;
+}
+
+namespace {
+
+ReadResult readAllParts(const QStringList& fileNames,
                          const QJsonObject& options)
 {
   ReadResult result;
@@ -209,9 +233,11 @@ ReadResult readImageData(const QStringList& fileNames,
   if (FileFormatManager::instance().pythonReaderFactory(suffix) != nullptr) {
     auto factory = FileFormatManager::instance().pythonReaderFactory(suffix);
     auto reader = factory->createReader();
-    auto imageData = reader.read(fileNames[0]);
-    if (imageData) {
-      result.imageData = imageData;
+    auto parts = reader.readAll(fileNames[0]);
+    if (parts.data) {
+      result.imageData = parts.data;
+      result.darkData = parts.dark;
+      result.whiteData = parts.flat;
     }
     return result;
   }
@@ -253,5 +279,7 @@ ReadResult readImageData(const QStringList& fileNames,
   // No headless path — caller must fall back to interactive load.
   return result;
 }
+
+} // namespace
 
 } // namespace tomviz

@@ -27,6 +27,7 @@ worlds meet:
   direction for Table/Molecule ports.
 """
 
+import json
 import weakref
 
 import numpy as np
@@ -125,9 +126,57 @@ def wrap_vtk_image(image, legacy=False):
     scan_ids = _field_array(image, 'scan_ids')
     if scan_ids is not None:
         dataset.scan_ids = np.array(scan_ids)
+    metadata = get_metadata(image)
+    if metadata:
+        dataset.metadata = metadata
 
     _set_backing(dataset, image)
     return dataset
+
+
+# Free-form metadata (for example the scanner geometry a file reader
+# found) travels with the image as one JSON string in its field data.
+METADATA_ARRAY = 'tomviz_metadata'
+
+
+def _json_default(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f'{type(value).__name__} is not JSON serialisable')
+
+
+def get_metadata(image):
+    """The JSON metadata stored on a vtkImageData, as a dict ({} when
+    there is none or it does not parse)."""
+    fd = image.GetFieldData()
+    arr = fd.GetAbstractArray(METADATA_ARRAY) if fd else None
+    if arr is None or arr.GetNumberOfValues() < 1:
+        return {}
+    try:
+        value = json.loads(arr.GetValue(0))
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def set_metadata(image, metadata):
+    """Store a JSON-serialisable dict on a vtkImageData (removed when
+    empty)."""
+    from vtkmodules.vtkCommonCore import vtkStringArray
+    fd = image.GetFieldData()
+    fd.RemoveArray(METADATA_ARRAY)
+    if not metadata:
+        return
+    try:
+        text = json.dumps(metadata, default=_json_default)
+    except (TypeError, ValueError):
+        return  # not representable; keep whatever the image had
+    arr = vtkStringArray()
+    arr.SetName(METADATA_ARRAY)
+    arr.InsertNextValue(text)
+    fd.AddArray(arr)
 
 
 def _same_buffer(a, b) -> bool:
@@ -203,6 +252,9 @@ def flush_dataset(dataset, image=None):
     _set_field_array(image, 'tilt_angles', dataset.tilt_angles,
                      VTK_DOUBLE)
     _set_field_array(image, 'scan_ids', dataset.scan_ids, VTK_INT)
+    metadata = getattr(dataset, 'metadata', None)
+    if metadata:
+        set_metadata(image, metadata)
 
     image.Modified()
     return image
@@ -223,6 +275,9 @@ def refresh_dataset(dataset):
     tilt_angles = _field_array(image, 'tilt_angles')
     dataset.tilt_angles = (np.array(tilt_angles, dtype=np.float64)
                            if tilt_angles is not None else None)
+    metadata = get_metadata(image)
+    if metadata:
+        dataset.metadata = metadata
     return dataset
 
 
