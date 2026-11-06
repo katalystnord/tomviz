@@ -26,17 +26,12 @@ used: on real cone-beam data (CWI Walnut 1, dev/ring_bench.py) it flagged
 correction, in both the intensity and the line-integral domain.
 """
 
-from concurrent.futures import ThreadPoolExecutor
-import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import threading
 
 import numpy as np
 
-
-def _default_threads():
-    env = os.environ.get('TOMVIZ_CONEBEAM_THREADS')
-    if env:
-        return max(1, int(env))
-    return os.cpu_count() or 1
+from ..projectors.backproject_cpu import default_threads
 
 
 def _sorted_median(block, size):
@@ -126,26 +121,34 @@ def remove_rings(projections, size=None, sigma=3.0, dead=True, threads=None,
         raise ValueError('sigma must be positive')
     if out is None:
         out = np.empty(proj.shape, dtype=np.float32)
-    threads = threads or _default_threads()
+    threads = threads or default_threads()
 
     rows = max(1, min(16, n_v // max(1, threads)))
     chunks = [slice(r, min(r + rows, n_v)) for r in range(0, n_v, rows)]
-    done = [0]
+    # progress() and should_stop() are only called from this thread;
+    # workers see cancellation through the event.
+    stop = threading.Event()
 
     def work(sl):
-        if should_stop is not None and should_stop():
-            return False
+        if stop.is_set():
+            return
         block = np.asarray(proj[:, sl, :], dtype=np.float32)
         if dead:
             block = _interpolate_across(block, _dead_pixels(block))
         out[:, sl, :] = _filtering(block, sigma, size)
-        done[0] += 1
-        if progress is not None:
-            progress(done[0] / len(chunks))
-        return True
 
+    done = 0
     with ThreadPoolExecutor(threads) as ex:
-        ok = all(list(ex.map(work, chunks)))
-    if not ok or (should_stop is not None and should_stop()):
-        return None
+        pending = {ex.submit(work, sl) for sl in chunks}
+        while pending:
+            finished, pending = wait(pending, timeout=0.2,
+                                     return_when=FIRST_COMPLETED)
+            if should_stop is not None and should_stop():
+                stop.set()
+                return None
+            for fut in finished:
+                fut.result()
+                done += 1
+                if progress is not None:
+                    progress(done / len(chunks))
     return out

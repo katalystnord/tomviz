@@ -112,6 +112,21 @@ def test_threads_progress_out_and_stop(scan):
     assert remove_rings(clean, should_stop=lambda: True) is None
 
 
+def test_callbacks_only_on_the_calling_thread(scan):
+    # Tomviz progress objects are not meant to be poked from pool threads.
+    import threading
+    _, _, clean = scan
+    me = threading.get_ident()
+    seen = set()
+
+    def note(*_):
+        seen.add(threading.get_ident())
+        return False
+
+    remove_rings(clean, threads=THREADS, progress=note, should_stop=note)
+    assert seen == {me}
+
+
 def test_rejects_bad_input(scan):
     _, _, clean = scan
     with pytest.raises(ValueError):
