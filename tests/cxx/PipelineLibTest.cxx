@@ -4191,6 +4191,60 @@ TEST_F(PipelineLibTest, OptionalInputMayStayUnconnected)
   EXPECT_FALSE(add->execute());
 }
 
+TEST_F(PipelineLibTest, WiringAReferenceImageHidesItsDisplays)
+{
+  // Projections feed the operator's main input; a flat field feeds only
+  // its extra input. Wiring the flat hides the flat's displays (drawn at
+  // pixel scale next to the data), and nothing else.
+  auto* projections = new SourceNode();
+  projections->addOutput("out", PortType::ImageData);
+  auto* flat = new SourceNode();
+  flat->addOutput("out", PortType::ImageData);
+  auto* op = new AddTransform();
+  for (Node* n : std::initializer_list<Node*>{ projections, flat, op }) {
+    pipeline->addNode(n);
+  }
+  auto* group = new SinkGroupNode();
+  group->addPassthrough("data", PortType::ImageData);
+  pipeline->addNode(group);
+  pipeline->createLink(flat->outputPort("out"), group->inputPort("data"));
+  auto* flatOutline = new OutlineSink();
+  auto* flatDirect = new OutlineSink();
+  auto* dataOutline = new OutlineSink();
+  for (Node* n : std::initializer_list<Node*>{ flatOutline, flatDirect,
+                                               dataOutline }) {
+    pipeline->addNode(n);
+  }
+  pipeline->createLink(group->outputPort("data"),
+                       flatOutline->inputPort("volume"));
+  pipeline->createLink(flat->outputPort("out"),
+                       flatDirect->inputPort("volume"));
+  pipeline->createLink(projections->outputPort("out"),
+                       dataOutline->inputPort("volume"));
+
+  // The main input: nothing is hidden.
+  auto* main = pipeline->createLink(projections->outputPort("out"),
+                                    op->inputPort("a"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(main), 0);
+  EXPECT_TRUE(dataOutline->visibility());
+
+  // The extra input: the flat's displays go, in the group and outside it.
+  auto* extra =
+    pipeline->createLink(flat->outputPort("out"), op->inputPort("b"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(extra), 2);
+  EXPECT_FALSE(flatOutline->visibility());
+  EXPECT_FALSE(flatDirect->visibility());
+  EXPECT_TRUE(dataOutline->visibility());
+
+  // Data that is also some operator's main input keeps its displays.
+  flatOutline->setVisibility(true);
+  auto* other = new AddTransform();
+  pipeline->addNode(other);
+  pipeline->createLink(flat->outputPort("out"), other->inputPort("a"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(extra), 0);
+  EXPECT_TRUE(flatOutline->visibility());
+}
+
 TEST_F(PipelineLibTest, UnconnectedInputIsNamedWhenRunFails)
 {
   // A transform whose extra input was never wired must say which one,
