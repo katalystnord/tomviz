@@ -94,41 +94,15 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-fn voxel(ix: i32, iy: i32, iz: i32) -> f32 {
-    let lz = iz - params.z_first;
-    if (ix < 0 || iy < 0 || lz < 0 || ix >= i32(params.nx) ||
-        iy >= i32(params.ny) || lz >= params.nzb) {
-        return 0.0;
-    }
-    return vol[(u32(lz) * params.ny + u32(iy)) * params.nx + u32(ix)];
-}
+// One axis of the uploaded slab: flat-index stride, number of slices in
+// the buffer, and the global index of its first slice.
+struct Axis { stride: i32, size: i32, first: i32, }
 
-// Bilinear sample on plane p of axis a, at (qb, qc) on the other two axes
-// in increasing order.
-fn plane_sample(a: u32, p: i32, qb: f32, qc: f32) -> f32 {
-    let fb = floor(qb);
-    let fc = floor(qc);
-    let wb1 = qb - fb;
-    let wc1 = qc - fc;
-    let b0 = i32(fb);
-    let c0 = i32(fc);
-    var acc = 0.0;
-    for (var db = 0; db < 2; db++) {
-        let wb = select(1.0 - wb1, wb1, db == 1);
-        if (wb == 0.0) { continue; }
-        for (var dc = 0; dc < 2; dc++) {
-            let wc = select(1.0 - wc1, wc1, dc == 1);
-            if (wc == 0.0) { continue; }
-            let bi = b0 + db;
-            let ci = c0 + dc;
-            var v = 0.0;
-            if (a == 0u) { v = voxel(p, bi, ci); }
-            else if (a == 1u) { v = voxel(bi, p, ci); }
-            else { v = voxel(bi, ci, p); }
-            acc += v * wb * wc;
-        }
-    }
-    return acc;
+fn axis(i: u32) -> Axis {
+    let nx = i32(params.nx);
+    if (i == 0u) { return Axis(1, nx, 0); }
+    if (i == 1u) { return Axis(nx, i32(params.ny), 0); }
+    return Axis(nx * i32(params.ny), params.nzb, params.z_first);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -143,17 +117,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let o = (rays[r] + fu * rays[r + 1u] + fv * rays[r + 2u]).xyz;
     let d = (rays[r + 3u] + fu * rays[r + 4u] + fv * rays[r + 5u]).xyz;
     let ad = abs(d);
-    // Dominant axis a, the other two axes b < c, and plane count.
-    var a = 0u;
+    // Dominant axis a and the other two axes b < c. When a is x or y, c
+    // is z.
+    var a = 0u; var b = 1u; var c = 2u;
     var oa = o.x; var ob = o.y; var oc = o.z;
     var da = d.x; var db = d.y; var dc = d.z;
     var na = i32(params.nx);
     if (ad.y > ad.x && ad.y >= ad.z) {
-        a = 1u; oa = o.y; ob = o.x; da = d.y; db = d.x; na = i32(params.ny);
+        a = 1u; b = 0u;
+        oa = o.y; ob = o.x; da = d.y; db = d.x; na = i32(params.ny);
     } else if (ad.z > ad.x && ad.z > ad.y) {
-        a = 2u; oa = o.z; ob = o.x; oc = o.y; da = d.z; db = d.x; dc = d.y;
+        a = 2u; b = 0u; c = 1u;
+        oa = o.z; ob = o.x; oc = o.y; da = d.z; db = d.x; dc = d.y;
         na = i32(params.nz);
     }
+    let A = axis(a);
+    let B = axis(b);
+    let C = axis(c);
     var p_lo = 0;
     var p_hi = na - 1;
     if (a == 2u) {
@@ -174,12 +154,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let t = (f32(p) - oa) / da;
         let qb = ob + t * db;
         let qc = oc + t * dc;
+        let fb = floor(qb);
+        let fc = floor(qc);
+        let c0 = i32(fc);
         if (a != 2u) {
             // Each sample belongs to the slab holding floor(z).
-            let kz = i32(floor(qc));
-            if (kz < params.own0 || kz >= params.own1) { continue; }
+            if (c0 < params.own0 || c0 >= params.own1) { continue; }
         }
-        acc += plane_sample(a, p, qb, qc);
+        let wb1 = qb - fb;
+        let wc1 = qc - fc;
+        // Indices into the uploaded slab; p is always inside it.
+        let b0 = i32(fb) - B.first;
+        let cl = c0 - C.first;
+        let base = (p - A.first) * A.stride;
+        for (var i = 0; i < 2; i++) {
+            let wb = select(1.0 - wb1, wb1, i == 1);
+            let bi = b0 + i;
+            if (wb == 0.0 || bi < 0 || bi >= B.size) { continue; }
+            for (var j = 0; j < 2; j++) {
+                let wc = select(1.0 - wc1, wc1, j == 1);
+                let ci = cl + j;
+                if (wc == 0.0 || ci < 0 || ci >= C.size) { continue; }
+                acc += vol[base + bi * B.stride + ci * C.stride] * wb * wc;
+            }
+        }
     }
     let scale = vec3<f32>(params.sx, params.sy, params.sz);
     let step = length(d * scale) / abs(da);
