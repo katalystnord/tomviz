@@ -31,7 +31,7 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
 
     projections: (n_angles, n_v, n_u) array.
     geom: ConeGeometry or ParallelGeometry. vol_geom: VolumeGeometry
-        (default: geom.default_volume() for cone beams).
+        (default: geom.default_volume()).
     relaxation: lambda, between 0 and 2; 1 is the usual choice.
     nonnegative: clip negative values after every iteration.
     backend: 'cpu', 'gpu' or 'auto', or a Backend.

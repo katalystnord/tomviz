@@ -413,3 +413,16 @@ class ParallelGeometry:
         P[:, 1, 3] = cv - np.einsum('ij,ij->i', v_star, D)
         P[:, 2, 3] = 1.0
         return P
+
+    def default_volume(self, shape=None, voxel_size=None):
+        """A volume that covers the detector's field of view, with the
+        voxel size equal to the detector pitch (no magnification)."""
+        pu = float(np.median(np.linalg.norm(self.det_u, axis=1)))
+        pv = float(np.median(np.linalg.norm(self.det_v, axis=1)))
+        if voxel_size is None:
+            voxel_size = pu
+        if shape is None:
+            nxy = max(1, int(round(self.n_u * pu / voxel_size)))
+            nz = max(1, int(round(self.n_v * pv / voxel_size)))
+            shape = (nz, nxy, nxy)
+        return VolumeGeometry(shape, voxel_size)

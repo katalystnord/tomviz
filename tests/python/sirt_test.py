@@ -130,3 +130,10 @@ def test_sirt_operator(phantom, sparse_cone):
     assert here > 0.45
     for sx, sy, sz in [(-1, 1, 1), (1, -1, 1), (1, 1, -1)]:
         assert at(sx * mx, sy * my, sz * mz) < here - 0.3
+
+
+def test_sirt_parallel_default_volume(phantom):
+    g = ParallelGeometry.circular(np.arange(-60, 61, 10.0), 0.75, 0.75,
+                                  32, 20)
+    x = sirt(phantom.project(g), g, iterations=2, backend='cpu')
+    assert x.shape == (20, 32, 32)
