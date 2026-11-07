@@ -22,7 +22,8 @@ import os
 
 import numpy as np
 
-from tomviz.projectors.geometry import ConeGeometry, VolumeGeometry
+from tomviz.projectors.geometry import (ConeGeometry, ParallelGeometry,
+                                        VolumeGeometry)
 
 from .filtering import preweight_and_filter
 
@@ -114,8 +115,8 @@ def create_emd(path, vol_geom, units='mm', name='FDK'):
         data = group['data']
         data.attrs['name'] = name
         offset = data.id.get_offset()
-        for i, (axis, n, step) in enumerate((('x', nz, dz), ('y', nx, dx),
-                                              ('z', ny, dy))):
+        axes = (('x', nz, dz), ('y', nx, dx), ('z', ny, dy))
+        for i, (axis, n, step) in enumerate(axes):
             d = group.create_dataset(f'dim{i + 1}', data=np.arange(
                 n, dtype=np.float32) * np.float32(step))
             d.attrs['name'] = axis
@@ -132,8 +133,12 @@ def crop_rows(geom, r0, r1):
     """The geometry of detector rows r0..r1 only: the same source and
     pixel steps, the detector centre moved to the middle of those rows."""
     shift = (r0 + (r1 - r0 - 1) / 2) - (geom.n_v - 1) / 2
-    return ConeGeometry(geom.source, geom.det_center + shift * geom.det_v,
-                        geom.det_u, geom.det_v, geom.n_u, r1 - r0,
+    center = geom.det_center + shift * geom.det_v
+    if isinstance(geom, ParallelGeometry):
+        return ParallelGeometry(geom.ray, center, geom.det_u, geom.det_v,
+                                geom.n_u, r1 - r0)
+    return ConeGeometry(geom.source, center, geom.det_u, geom.det_v,
+                        geom.n_u, r1 - r0,
                         nominal_angles=geom.nominal_angles)
 
 

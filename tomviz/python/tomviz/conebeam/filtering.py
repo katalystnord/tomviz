@@ -9,9 +9,17 @@ Follows Feldkamp, Davis & Kress (1984) in the form given by Kak & Slaney,
 rescaled to a virtual detector through the rotation axis, cosine weighted,
 ramp filtered along detector rows, and backprojected with the inverse square
 distance weight.
+
+Parallel-beam geometries (tomviz.projectors.ParallelGeometry) take the
+same path with no fan: no cosine weight, the detector pitch as the sample
+spacing, and Parker's weights with a zero fan angle, which make every
+ray count once for any scan of 180 degrees or more. FDK then is filtered
+backprojection (FBP).
 """
 
 import numpy as np
+
+from tomviz.projectors.geometry import ParallelGeometry
 
 FILTERS = ('ram-lak', 'shepp-logan', 'cosine', 'hamming', 'hann')
 
@@ -115,6 +123,8 @@ def scan_coverage(geom):
     n = len(beta)
     span = abs(beta[-1] - beta[0])
     coverage = span * n / (n - 1) if n > 1 else 0.0
+    if isinstance(geom, ParallelGeometry):
+        return coverage, 0.0
     pu, _ = geom.principal_point()
     pitch = np.linalg.norm(geom.det_u, axis=1)
     sdd = geom.sdd()
@@ -135,6 +145,9 @@ def parker_weights(geom):
     coverage, delta = scan_coverage(geom)
     # Stretch a scan longer than the minimum so the weights cover it.
     delta = max(delta, (coverage - np.pi) / 2)
+    if isinstance(geom, ParallelGeometry):
+        gamma = np.zeros((geom.n_angles, geom.n_u))
+        return _parker(b[:, None], delta, gamma)
     pu, _ = geom.principal_point()
     pitch = np.linalg.norm(geom.det_u, axis=1)
     iu = np.arange(geom.n_u)[None, :]
@@ -146,7 +159,10 @@ def parker_weights(geom):
     side[side == 0] = 1.0
     fan = (iu - pu[:, None]) * pitch[:, None] / geom.sdd()[:, None]
     gamma = -side[:, None] * np.arctan(fan)
-    b = b[:, None]
+    return _parker(b[:, None], delta, gamma)
+
+
+def _parker(b, delta, gamma):
     w = np.ones_like(gamma)
     with np.errstate(divide='ignore', invalid='ignore'):
         rise = b < 2 * (delta - gamma)
@@ -205,6 +221,18 @@ def preweight_and_filter(projections, geom, filter_name='ram-lak',
     H, n_fft = ramp_kernel(geom.n_u, filter_name, cutoff)
     red, note = redundancy_weights(geom, short_scan)
     dbeta = angular_steps(geom.angles())
+    pitch_u = np.linalg.norm(geom.det_u, axis=1)
+    if isinstance(geom, ParallelGeometry):
+        H = H.astype(np.complex64)
+        for k in range(geom.n_angles):
+            # No fan: the detector samples the object at its own pitch.
+            column = (red[k] * (dbeta[k] / pitch_u[k])).astype(np.float32)
+            row = proj[k] * column[None, :]
+            F = _fft.rfft(row, n=n_fft, axis=1, **_FFT_KW)
+            F *= H
+            out[k] = _fft.irfft(F, n=n_fft, axis=1,
+                                **_FFT_KW)[:, :geom.n_u]
+        return out, note
     pu, pv = geom.principal_point()
     sod, sdd = geom.sod(), geom.sdd()
     pitch_u = np.linalg.norm(geom.det_u, axis=1)

@@ -365,6 +365,11 @@ class ParallelGeometry(_FlatDetector):
         ray direction, detector centre, u step, v step."""
         return cls(*_astra_vectors(vectors), n_u, n_v)
 
+    def angles(self):
+        """Rotation angle of every projection, unwrapped, in radians, as
+        ConeGeometry.angles: 0 when the rays travel along -x."""
+        return np.unwrap(np.arctan2(-self.ray[:, 1], -self.ray[:, 0]))
+
     def ray_parameters(self):
         """Rays as origin(iu, iv) + t * direction(iu, iv); see
         ConeGeometry.ray_parameters. Parallel rays start at the pixel."""
