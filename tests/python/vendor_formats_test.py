@@ -197,3 +197,59 @@ def test_skyscan_refuses_other_log_files(tmp_path):
     (tmp_path / 'build.log').write_text('compiling...\n')
     with pytest.raises(ValueError, match='not a Bruker SkyScan scan log'):
         SkyScanReader().read(str(tmp_path / 'build.log'))
+
+
+# -- ZEISS --------------------------------------------------------------------
+
+def zeiss_meta(n=4):
+    return {'n': n, 'width': COLS, 'height': ROWS, 'voxel_um': 40.0,
+            'angles': np.arange(n) * 90.0, 'sod': np.full(n, -100.0),
+            'odd': np.full(n, 50.0),
+            'x_shifts': np.array([0.0, 1.5, -2.0, 0.25]),
+            'y_shifts': np.array([0.0, 0.0, 1.0, -0.5])}
+
+
+def test_zeiss_geometry_keeps_the_sub_pixel_shifts():
+    from tomviz.io.formats import zeiss
+    meta = zeiss_meta()
+    g = zeiss.scan_geometry(meta)
+    assert (g['sod'], g['sdd']) == (100.0, 150.0)
+    assert g['pixel_size_u'] == pytest.approx(0.04 * 150 / 100)
+    vecs = np.array(g['vectors'])
+    source, centre, det_u, det_v = zeiss.circular_orbit(
+        meta['angles'], 100.0, 150.0, 0.06, zeiss.CLOCKWISE)
+    np.testing.assert_allclose(vecs[:, 0:3], source)
+    expected = zeiss.SHIFT_SIGN * (meta['x_shifts'][:, None] * det_u +
+                                   meta['y_shifts'][:, None] * det_v)
+    np.testing.assert_allclose(vecs[:, 3:6] - centre, expected, atol=1e-9)
+    # The circular orbit: source and detector on opposite sides at 0 deg.
+    np.testing.assert_allclose(source[0], [100, 0, 0])
+    np.testing.assert_allclose(centre[0], [-50, 0, 0])
+
+
+def test_zeiss_needs_olefile(monkeypatch):
+    import builtins
+    from tomviz.io.formats import zeiss
+    real_import = builtins.__import__
+
+    def no_olefile(name, *args, **kwargs):
+        if name == 'olefile':
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', no_olefile)
+    with pytest.raises(RuntimeError, match='needs the olefile package'):
+        zeiss._open('scan.txrm')
+
+
+@pytest.mark.skipif(not __import__('os').environ.get('TOMVIZ_ZEISS_TXRM'),
+                    reason='set TOMVIZ_ZEISS_TXRM to a real .txrm to run')
+def test_zeiss_real_scan():
+    import os
+    from tomviz.io.formats.zeiss import ZeissReader
+    result = ZeissReader().read(os.environ['TOMVIZ_ZEISS_TXRM'])
+    ds = wrap(result)
+    n = ds.active_scalars.shape[2]
+    assert len(ds.tilt_angles) == n
+    assert len(ds.metadata['geometry']['vectors']) == n
+    flat = _boundary.wrap_vtk_image(result['flat'], legacy=True)
+    assert flat.active_scalars.shape[:2] == ds.active_scalars.shape[:2]
