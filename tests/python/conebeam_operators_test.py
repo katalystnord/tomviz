@@ -251,3 +251,14 @@ def test_geometry_from_the_data_refuses_missing_or_cropped(line_integrals):
     ds.metadata = {'geometry': dict(GEOMETRY, detector_shape=[N_V, N_U + 3])}
     with pytest.raises(RuntimeError, match='were cropped'):
         run_fdk(ds, geometry_source='metadata')
+
+
+def test_intensity_uses_the_stored_open_beam_level(line_integrals):
+    # A scanner file reader may store the open-beam level (Nikon
+    # WhiteLevel, Waygate FreeRay); with I0 = 0 it beats estimating.
+    raw = 60000.0 * np.exp(-line_integrals)
+    ds = make_dataset(to_tomviz(raw), ANGLES)
+    ds.metadata = {'white_level': 60000.0}
+    load_operator_module('IntensityToLineIntegrals').transform(ds)
+    np.testing.assert_allclose(ds.active_scalars, to_tomviz(line_integrals),
+                               atol=1e-4)

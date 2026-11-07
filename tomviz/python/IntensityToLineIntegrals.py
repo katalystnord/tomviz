@@ -13,6 +13,11 @@ def transform(dataset, i0=0.0, air_percentile=99.5, dark_level=0.0,
         raise RuntimeError('Expected a stack of projections')
     frames = np.moveaxis(projections, 2, 0)
 
+    # The scanner's own open-beam level, when its file reader stored one
+    # (Nikon WhiteLevel, Waygate FreeRay), beats estimating it.
+    stored = (getattr(dataset, 'metadata', None) or {}).get('white_level')
+    if i0 <= 0 and stored:
+        i0 = float(stored)
     if i0 > 0:
         flat = np.float32(i0)
     else:

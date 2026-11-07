@@ -5,8 +5,8 @@
   "parameters": [
     {
       "name": "i0",
-      "label": "Open-Beam Intensity (I0)",
-      "description": "Intensity with no sample in the beam. 0 estimates it from each projection.",
+      "label": "Open-Beam Intensity (I0, 0 = automatic)",
+      "description": "Intensity with no sample in the beam. 0 uses the level the scanner file gives (Nikon WhiteLevel, Waygate FreeRay) or, without one, estimates it from each projection.",
       "type": "double",
       "default": 0.0,
       "minimum": 0.0,
