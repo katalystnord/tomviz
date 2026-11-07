@@ -807,7 +807,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
                                  readInPythonScript("BinTiltSeriesByTwo"));
   new AddPythonTransformReaction(
     removeBadPixelsAction, "Remove Bad Pixels",
-    readInPythonScript("RemoveBadPixelsTiltSeries"));
+    readInPythonScript("RemoveBadPixelsTiltSeries"),
+    readInJSONDescription("RemoveBadPixelsTiltSeries"));
   new AddPythonTransformReaction(
     gaussianFilterAction, "Gaussian Filter Tilt Series",
     readInPythonScript("GaussianFilterTiltSeries"),

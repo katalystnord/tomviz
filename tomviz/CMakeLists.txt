@@ -689,6 +689,7 @@ set(json_files
   Rotate3D.json
   GenerateTiltSeries.json
   ctf_correct.json
+  RemoveBadPixelsTiltSeries.json
   PhaseRetrievalPaganin.json
   Recon_ART.json
   Recon_DFT.json
