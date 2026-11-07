@@ -18,7 +18,9 @@ Following the NXtomo application definition
 Like httomo's loader, the first group with ``definition == NXtomo`` is
 used, wherever it is in the file. Projections open as a tilt series, and
 flat and dark frames as datasets of their own for Flat/Dark Field
-Correction.
+Correction. Every frame's position in the file, its place in the
+acquisition, is kept as ``frame_index`` in the metadata, so flats taken
+before and after the scan can be interpolated over it.
 """
 
 import numpy as np
@@ -140,13 +142,21 @@ class NXtomoReader(Reader):
             proj, index = frames(PROJECTION)
             if proj is None:
                 raise ValueError(f'{path}: no projections (image_key 0)')
-            flat, _ = frames(FLAT)
-            dark, _ = frames(DARK)
+            flat, flat_index = frames(FLAT)
+            dark, dark_index = frames(DARK)
+            # Each frame's position in the file is its place in the
+            # acquisition, which lets flats taken before and after the
+            # scan be interpolated over it (Flat/Dark Field Correction).
+            metadata['frame_index'] = index.tolist()
             result = {'data': image_from_frames(proj, (px_v, px_u),
                                                 angles=theta[index],
                                                 metadata=metadata)}
             if flat is not None:
-                result['flat'] = image_from_frames(flat, (px_v, px_u))
+                result['flat'] = image_from_frames(
+                    flat, (px_v, px_u),
+                    metadata={'frame_index': flat_index.tolist()})
             if dark is not None:
-                result['dark'] = image_from_frames(dark, (px_v, px_u))
+                result['dark'] = image_from_frames(
+                    dark, (px_v, px_u),
+                    metadata={'frame_index': dark_index.tolist()})
             return result
