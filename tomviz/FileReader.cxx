@@ -130,32 +130,36 @@ QVector<double> mrcTiltAngles(const QString& fileName, int count)
   return angles;
 }
 
-/// A NeXus NXtomo file (tomviz.io.formats.nxtomo): projections with
-/// angles, plus flat and dark frames. False when the file is not NXtomo
-/// (or Python is not running), so other HDF5 readers can try.
-bool readNxtomo(const QString& fileName, ReadResult& result)
+/// Read with a Python reader that recognises its own files:
+/// tomviz.io.formats.<module>.<check>(path) says whether the file is one
+/// of them, and <reader> reads it (data, and flat and dark frames when
+/// present). False when the file is not one of them, or Python is not
+/// running, so other readers can try.
+bool readWithPythonFormat(const QString& moduleName, const QString& check,
+                          const QString& readerName, const QString& fileName,
+                          ReadResult& result)
 {
   if (!vtkPythonInterpreter::IsInitialized()) {
     return false;
   }
   Python python;
-  auto module = python.import("tomviz.io.formats.nxtomo");
+  auto module = python.import("tomviz.io.formats." + moduleName);
   if (!module.isValid()) {
     return false;
   }
-  auto check = module.findFunction("is_nxtomo");
-  if (!check.isValid()) {
+  auto checkFunction = module.findFunction(check);
+  if (!checkFunction.isValid()) {
     return false;
   }
   Python::Tuple args(1);
   Python::Object file(fileName);
   args.set(0, file);
-  auto isNxtomo = check.call(args);
-  if (!isNxtomo.isValid() || !isNxtomo.toBool()) {
+  auto isOne = checkFunction.call(args);
+  if (!isOne.isValid() || !isOne.toBool()) {
     Python::checkForPythonError();
     return false;
   }
-  auto cls = module.findFunction("NXtomoReader");
+  auto cls = module.findFunction(readerName);
   auto instance = cls.isValid() ? cls.call() : Python::Object();
   if (!instance.isValid()) {
     Python::checkForPythonError();
@@ -268,8 +272,12 @@ ReadResult readAllParts(const QStringList& fileNames,
     return result;
   }
 
-  // .emd — simple EMD reader.
+  // .emd — Thermo Fisher Velox, else the (Berkeley) EMD reader.
   if (suffix == "emd") {
+    if (readWithPythonFormat("velox", "is_velox", "VeloxReader", fileName,
+                             result)) {
+      return result;
+    }
     QVariantMap emdOptions = hdf5OptionsFromJson(options);
     vtkNew<vtkImageData> imageData;
     if (EmdFormat::read(fileName.toLatin1().data(), imageData, emdOptions)) {
@@ -284,7 +292,9 @@ ReadResult readAllParts(const QStringList& fileNames,
       suffix == "nx") {
     QVariantMap hdf5Options = hdf5OptionsFromJson(options);
     const auto fnStd = fileName.toStdString();
-    if (readNxtomo(fileName, result)) {
+    // NeXus NXtomo (ESRF, Diamond): projections, flats and darks.
+    if (readWithPythonFormat("nxtomo", "is_nxtomo", "NXtomoReader",
+                             fileName, result)) {
       return result;
     }
     if (GenericHDF5Format::isDataExchange(fnStd)) {

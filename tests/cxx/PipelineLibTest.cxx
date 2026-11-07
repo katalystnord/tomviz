@@ -1910,6 +1910,44 @@ with h5py.File(path, 'w') as f:
   EXPECT_EQ(all.darkData->GetScalarRange()[1], 11.0);
 }
 
+TEST_F(PipelinePythonTest, VeloxEmdIsReadAsVelox)
+{
+  // .emd files from Thermo Fisher Velox are recognised before the
+  // (Berkeley) EMD reader; per-frame alpha tilts make a tilt series.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("tilts.emd");
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["path"] = path.toStdString();
+    py::exec(R"(
+import json
+import h5py
+import numpy as np
+tilts = np.radians([-30.0, 0.0, 30.0])
+blobs = [json.dumps({'Stage': {'AlphaTilt': str(t)}, 'BinaryResult': {
+    'PixelSize': {'width': '1e-9', 'height': '1e-9'}}}).encode()
+    for t in tilts]
+meta = np.zeros((300, 3), np.uint8)
+for i, b in enumerate(blobs):
+    meta[:len(b), i] = np.frombuffer(b, np.uint8)
+with h5py.File(path, 'w') as f:
+    f['Version'] = np.array([b'{"version": "11", "format": "Velox"}'])
+    f['Data/Image/x/Data'] = np.ones((4, 5, 3), np.int16)
+    f['Data/Image/x/Metadata'] = meta
+)",
+             scope, scope);
+  }
+  auto r = tomviz::readImageData({ path });
+  ASSERT_TRUE(r.imageData);
+  auto angles = VolumeData::getTiltAngles(r.imageData);
+  ASSERT_EQ(angles.size(), 3);
+  EXPECT_NEAR(angles[0], -30.0, 1e-9);
+  EXPECT_NEAR(angles[2], 30.0, 1e-9);
+  EXPECT_DOUBLE_EQ(r.imageData->GetSpacing()[0], 1.0);
+}
+
 TEST_F(PipelinePythonTest, ReaderSourceCanReadTheFlatOrDarkPart)
 {
   // Flat and dark frames open as datasets of their own; on a state load

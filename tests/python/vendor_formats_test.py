@@ -365,3 +365,53 @@ def test_digitalmicrograph_real_stack():
     from tomviz.io.formats.digitalmicrograph import DigitalMicrographReader
     ds = wrap(DigitalMicrographReader().read(os.environ['TOMVIZ_DM3_TILTS']))
     np.testing.assert_allclose(ds.tilt_angles, np.arange(-90, 91, 2.0))
+
+
+# -- Thermo Fisher Velox EMD -------------------------------------------------
+
+def write_velox(path, tilts_rad):
+    import json
+    h5py = pytest.importorskip('h5py')
+    n = len(tilts_rad)
+    data = np.stack([np.full((ROWS, COLS), i, np.int16) for i in range(n)],
+                    axis=2)  # (y, x, frames), as Velox stores it
+    blobs = [json.dumps({'Stage': {'AlphaTilt': f'{t:.6f}'},
+                         'BinaryResult': {'PixelSize': {
+                             'width': '2e-10', 'height': '2e-10'},
+                             'PixelUnitX': 'm', 'Detector': 'HAADF'}}
+                        ).encode() for t in tilts_rad]
+    meta = np.zeros((max(map(len, blobs)) + 8, n), np.uint8)
+    for i, b in enumerate(blobs):
+        meta[:len(b), i] = np.frombuffer(b, np.uint8)
+    with h5py.File(path, 'w') as f:
+        f['Version'] = np.array([b'{"version": "11", "format": "Velox"}'])
+        f['Data/Image/abc/Data'] = data
+        f['Data/Image/abc/Metadata'] = meta
+    return str(path)
+
+
+def test_velox_tilt_stack(tmp_path):
+    from tomviz.io.formats.velox import VeloxReader, is_velox
+    path = write_velox(tmp_path / 'tilts.emd', np.radians([-60, 0, 60]))
+    assert is_velox(path)
+    ds = wrap(VeloxReader().read(path))
+    assert ds.active_scalars.shape == (COLS, ROWS, 3)  # x = columns
+    assert ds.active_scalars[0, 0, 2] == 2
+    np.testing.assert_allclose(ds.tilt_angles, [-60, 0, 60], atol=1e-4)
+    assert ds.spacing[0] == pytest.approx(0.2)  # nm
+    assert ds.metadata['velox']['detector'] == 'HAADF'
+
+
+def test_velox_stack_at_one_tilt_is_not_a_tilt_series(tmp_path):
+    from tomviz.io.formats.velox import VeloxReader
+    path = write_velox(tmp_path / 'stack.emd', [0.1, 0.1])
+    assert wrap(VeloxReader().read(path)).tilt_angles is None
+
+
+def test_berkeley_emd_is_not_velox(tmp_path):
+    h5py = pytest.importorskip('h5py')
+    from tomviz.io.formats.velox import is_velox
+    with h5py.File(tmp_path / 'b.emd', 'w') as f:
+        f.attrs['version_major'] = 0
+        f['data/tomography/data'] = np.zeros((2, 2, 2))
+    assert not is_velox(str(tmp_path / 'b.emd'))
