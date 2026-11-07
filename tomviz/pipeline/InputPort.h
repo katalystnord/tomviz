@@ -33,6 +33,11 @@ public:
   bool hasData() const;
   bool isStale() const;
 
+  /// An optional input may stay unconnected: the node still runs and
+  /// receives no data for it (Python operators get their default, None).
+  bool isOptional() const;
+  void setOptional(bool optional);
+
   /// Delivery channel for the upstream payload during executor-driven
   /// runs. The executor calls setHandle() before invoking the consumer
   /// node and clearHandle() after. Sinks that need their input alive
@@ -50,6 +55,7 @@ private:
 
   PortTypes m_acceptedTypes;
   Link* m_link = nullptr;
+  bool m_optional = false;
   std::shared_ptr<PortData> m_handle;
 };
 

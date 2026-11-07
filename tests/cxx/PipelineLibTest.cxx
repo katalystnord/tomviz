@@ -86,6 +86,8 @@
 
 #include <vector>
 
+#include <vtkObjectFactory.h>
+#include <vtkOutputWindow.h>
 #include <vtkDoubleArray.h>
 #include <vtkFloatArray.h>
 #include <vtkImageData.h>
@@ -1521,6 +1523,31 @@ TEST_F(PipelinePythonTest, JSONParameterDefaults)
   // Override a parameter
   transform->setParameter("threshold", 1.5);
   EXPECT_EQ(transform->parameter("threshold").toDouble(), 1.5);
+
+  delete transform;
+}
+
+TEST_F(PipelinePythonTest, DatasetParametersBecomeInputs)
+{
+  // Dataset parameters become input ports after the primary one;
+  // "optional": true lets one stay unconnected.
+  QString jsonStr = R"({
+    "name": "TestOp",
+    "label": "Test Operator",
+    "parameters": [
+      { "name": "flat", "type": "dataset" },
+      { "name": "dark", "type": "dataset", "optional": true }
+    ]
+  })";
+
+  auto* transform = new LegacyPythonTransform();
+  transform->setJSONDescription(jsonStr);
+
+  ASSERT_NE(transform->inputPort("flat"), nullptr);
+  ASSERT_NE(transform->inputPort("dark"), nullptr);
+  EXPECT_FALSE(transform->inputPort("volume")->isOptional());
+  EXPECT_FALSE(transform->inputPort("flat")->isOptional());
+  EXPECT_TRUE(transform->inputPort("dark")->isOptional());
 
   delete transform;
 }
@@ -4063,6 +4090,234 @@ TEST_F(PipelineLibTest, ClipSinkLinkingPropagatesToLinkedPeers)
 
   a->setDirection(ClipSink::XZ);
   EXPECT_EQ(b->direction(), ClipSink::XZ);
+}
+
+namespace {
+// Counts the clipping planes a Clip hands it.
+struct PlaneCountingSink : OutlineSink
+{
+  int planes = 0;
+  void addClippingPlane(vtkPlane*) override { ++planes; }
+  void removeClippingPlane(vtkPlane*) override { --planes; }
+};
+} // namespace
+
+namespace {
+QStringList g_warnings;
+void recordWarning(QtMsgType type, const QMessageLogContext&,
+                   const QString& msg)
+{
+  if (type == QtWarningMsg) {
+    g_warnings << msg;
+  }
+}
+} // namespace
+
+namespace {
+// Counts VTK errors instead of printing them.
+class ErrorCountingOutputWindow : public vtkOutputWindow
+{
+public:
+  static ErrorCountingOutputWindow* New();
+  vtkTypeMacro(ErrorCountingOutputWindow, vtkOutputWindow);
+  int errors = 0;
+  void DisplayErrorText(const char*) override { ++errors; }
+};
+vtkStandardNewMacro(ErrorCountingOutputWindow);
+} // namespace
+
+TEST_F(PipelineLibTest, ContourWithoutDataRaisesNoVtkError)
+{
+  // Setting the iso value before any data arrives (a state restore or
+  // the properties panel does) ran FlyingEdges on an empty producer and
+  // printed "is of type vtkDataObject, but a vtkImageData is required".
+  vtkNew<ErrorCountingOutputWindow> counter;
+  vtkSmartPointer<vtkOutputWindow> previous = vtkOutputWindow::GetInstance();
+  vtkOutputWindow::SetInstance(counter);
+  {
+    ContourSink contour;
+    contour.setIsoValue(1.0);
+    contour.setColorByArray(true);
+  }
+  vtkOutputWindow::SetInstance(previous);
+  EXPECT_EQ(counter->errors, 0);
+}
+
+namespace {
+// out = a + b, with b optional (0 when not connected).
+class OptionalAddTransform : public TransformNode
+{
+public:
+  OptionalAddTransform()
+  {
+    addInput("a", PortType::ImageData);
+    addInput("b", PortType::ImageData)->setOptional(true);
+    addOutput("out", PortType::ImageData);
+  }
+
+protected:
+  QMap<QString, PortData> transform(
+    const QMap<QString, PortData>& inputs) override
+  {
+    int b = inputs["b"].isValid() ? inputs["b"].value<int>() : 0;
+    QMap<QString, PortData> result;
+    result["out"] =
+      PortData(std::any(inputs["a"].value<int>() + b), PortType::ImageData);
+    return result;
+  }
+};
+} // namespace
+
+TEST_F(PipelineLibTest, OptionalInputMayStayUnconnected)
+{
+  auto* source = new SourceNode();
+  source->addOutput("out", PortType::ImageData);
+  pipeline->addNode(source);
+  auto* add = new OptionalAddTransform();
+  pipeline->addNode(add);
+  pipeline->createLink(source->outputPort("out"), add->inputPort("a"));
+  source->setOutputData("out", PortData(std::any(10), PortType::ImageData));
+
+  auto* future = pipeline->execute();
+  EXPECT_TRUE(future->succeeded());
+  EXPECT_EQ(add->state(), NodeState::Current);
+  EXPECT_EQ(add->outputPort("out")->data().value<int>(), 10);
+  EXPECT_TRUE(add->allInputsCurrent());
+
+  // A required input left unconnected still blocks it.
+  add->inputPort("a")->setOptional(false);
+  pipeline->removeLink(add->inputPort("a")->link());
+  EXPECT_FALSE(add->allInputsCurrent());
+  EXPECT_FALSE(add->execute());
+}
+
+TEST_F(PipelineLibTest, WiringAReferenceImageHidesItsDisplays)
+{
+  // Projections feed the operator's main input; a flat field feeds only
+  // its extra input. Wiring the flat hides the flat's displays (drawn at
+  // pixel scale next to the data), and nothing else.
+  auto* projections = new SourceNode();
+  projections->addOutput("out", PortType::ImageData);
+  auto* flat = new SourceNode();
+  flat->addOutput("out", PortType::ImageData);
+  auto* op = new AddTransform();
+  for (Node* n : std::initializer_list<Node*>{ projections, flat, op }) {
+    pipeline->addNode(n);
+  }
+  auto* group = new SinkGroupNode();
+  group->addPassthrough("data", PortType::ImageData);
+  pipeline->addNode(group);
+  pipeline->createLink(flat->outputPort("out"), group->inputPort("data"));
+  auto* flatOutline = new OutlineSink();
+  auto* flatDirect = new OutlineSink();
+  auto* dataOutline = new OutlineSink();
+  for (Node* n : std::initializer_list<Node*>{ flatOutline, flatDirect,
+                                               dataOutline }) {
+    pipeline->addNode(n);
+  }
+  pipeline->createLink(group->outputPort("data"),
+                       flatOutline->inputPort("volume"));
+  pipeline->createLink(flat->outputPort("out"),
+                       flatDirect->inputPort("volume"));
+  pipeline->createLink(projections->outputPort("out"),
+                       dataOutline->inputPort("volume"));
+
+  // The main input: nothing is hidden.
+  auto* main = pipeline->createLink(projections->outputPort("out"),
+                                    op->inputPort("a"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(main), 0);
+  EXPECT_TRUE(dataOutline->visibility());
+
+  // The extra input: the flat's displays go, in the group and outside it.
+  auto* extra =
+    pipeline->createLink(flat->outputPort("out"), op->inputPort("b"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(extra), 2);
+  EXPECT_FALSE(flatOutline->visibility());
+  EXPECT_FALSE(flatDirect->visibility());
+  EXPECT_TRUE(dataOutline->visibility());
+
+  // Data that is also some operator's main input keeps its displays.
+  flatOutline->setVisibility(true);
+  auto* other = new AddTransform();
+  pipeline->addNode(other);
+  pipeline->createLink(flat->outputPort("out"), other->inputPort("a"));
+  EXPECT_EQ(hideDisplaysOfAuxiliaryInput(extra), 0);
+  EXPECT_TRUE(flatOutline->visibility());
+}
+
+TEST_F(PipelineLibTest, UnconnectedInputIsNamedWhenRunFails)
+{
+  // A transform whose extra input was never wired must say which one,
+  // instead of failing silently.
+  auto* source = new SourceNode();
+  source->addOutput("out", PortType::ImageData);
+  pipeline->addNode(source);
+  auto* add = new AddTransform();
+  add->setLabel("Merge");
+  pipeline->addNode(add);
+  pipeline->createLink(source->outputPort("out"), add->inputPort("a"));
+  source->setOutputData("out", PortData(std::any(10), PortType::ImageData));
+
+  g_warnings.clear();
+  auto previous = qInstallMessageHandler(recordWarning);
+  bool ran = add->execute();
+  qInstallMessageHandler(previous);
+
+  EXPECT_FALSE(ran);
+  EXPECT_EQ(add->execState(), NodeExecState::Failed);
+  ASSERT_EQ(g_warnings.size(), 1);
+  EXPECT_TRUE(g_warnings[0].contains("Merge cannot run")) << g_warnings[0].toStdString();
+  EXPECT_TRUE(g_warnings[0].contains("'b'")) << g_warnings[0].toStdString();
+  EXPECT_FALSE(g_warnings[0].contains("'a'")) << g_warnings[0].toStdString();
+}
+
+TEST_F(PipelineLibTest, ClipSinkCutsDisplaysInAndOutsideGroups)
+{
+  // A Clip cuts every display of the same data: those attached directly
+  // and those in a Visualizations group, whichever side the Clip is on.
+  auto* source = new SphereSource();
+  source->setDimensions(8, 8, 8);
+  pipeline->addNode(source);
+  auto* group = new SinkGroupNode();
+  group->addPassthrough("data", PortType::ImageData);
+  pipeline->addNode(group);
+  pipeline->createLink(source->outputPort("volume"),
+                       group->inputPort("data"));
+
+  auto* direct = new PlaneCountingSink();
+  auto* grouped = new PlaneCountingSink();
+  auto* clip = new ClipSink();
+  pipeline->addNode(direct);
+  pipeline->addNode(grouped);
+  pipeline->addNode(clip);
+  pipeline->createLink(source->outputPort("volume"),
+                       direct->inputPort("volume"));
+  pipeline->createLink(group->outputPort("data"),
+                       grouped->inputPort("volume"));
+  pipeline->createLink(group->outputPort("data"), clip->inputPort("volume"));
+  EXPECT_EQ(direct->planes, 1);
+  EXPECT_EQ(grouped->planes, 1);
+
+  // A display that joins later is cut too, and one that leaves is not.
+  auto* late = new PlaneCountingSink();
+  pipeline->addNode(late);
+  pipeline->createLink(source->outputPort("volume"),
+                       late->inputPort("volume"));
+  EXPECT_EQ(late->planes, 1);
+  pipeline->removeLink(direct->inputPort("volume")->link());
+  EXPECT_EQ(direct->planes, 0);
+
+  // Hiding the Clip takes its plane away everywhere, showing it restores.
+  clip->setVisibility(false);
+  EXPECT_EQ(grouped->planes, 0);
+  EXPECT_EQ(late->planes, 0);
+  clip->setVisibility(true);
+  EXPECT_EQ(grouped->planes, 1);
+
+  // Disconnecting the Clip releases them all.
+  pipeline->removeLink(clip->inputPort("volume")->link());
+  EXPECT_EQ(grouped->planes, 0);
+  EXPECT_EQ(late->planes, 0);
 }
 
 TEST_F(PipelineLibTest, SinkLinkFlagSurvivesSerialization)

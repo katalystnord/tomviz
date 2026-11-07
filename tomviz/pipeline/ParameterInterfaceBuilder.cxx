@@ -165,6 +165,23 @@ auto widgetValue(const T* w)
   }
 }
 
+// Show a parameter's "description" as the tooltip of its row (label and
+// widget). Rich text, so long descriptions wrap.
+void setRowToolTip(QGridLayout* layout, int row, const QString& description)
+{
+  if (description.isEmpty() || row >= layout->rowCount()) {
+    return;
+  }
+  const QString tip =
+    QStringLiteral("<p>%1</p>").arg(description.toHtmlEscaped());
+  for (int column = 0; column < layout->columnCount(); ++column) {
+    auto* item = layout->itemAtPosition(row, column);
+    if (item && item->widget() && item->widget()->toolTip().isEmpty()) {
+      item->widget()->setToolTip(tip);
+    }
+  }
+}
+
 // --- Widget builders ---
 
 void addBoolWidget(QGridLayout* layout, int row, QJsonObject& parameterNode)
@@ -1080,6 +1097,8 @@ void ParameterInterfaceBuilder::buildParameterInterface(
     } else if (typeString == "select_scalars") {
       addSelectScalarsWidget(layout, i + 1, parameterObject, m_portScalars);
     }
+    setRowToolTip(layout, i + 1,
+                  parameterObject.value("description").toString());
     // Note: "dataset" type is not supported in the pipeline lib
     // (it depends on DataSource/ModuleManager).
   }

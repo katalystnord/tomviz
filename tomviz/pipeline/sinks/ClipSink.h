@@ -167,6 +167,7 @@ private:
   // Clipping plane propagation to sibling sinks
   void connectToSiblings();
   void disconnectFromSiblings();
+  void refreshClippedSinks(const Link* removed = nullptr);
   void onInputConnectionChanged();
   void onPipelineLinkCreated(Link* link);
   void onPipelineLinkRemoved(Link* link);

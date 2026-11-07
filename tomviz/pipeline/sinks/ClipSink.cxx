@@ -9,6 +9,7 @@
 #include "Link.h"
 #include "OutputPort.h"
 #include "Pipeline.h"
+#include "PipelineUtils.h"
 #include "PlaneIndexing.h"
 #include "Port.h"
 #include "data/VolumeData.h"
@@ -1106,6 +1107,7 @@ void ClipSink::onWidgetInteraction()
 
 // --- Clipping plane propagation to sibling sinks ---
 
+
 void ClipSink::onInputConnectionChanged()
 {
   disconnectFromSiblings();
@@ -1125,12 +1127,7 @@ void ClipSink::connectToSiblings()
     return;
   }
 
-  for (auto* sink : siblingSinks("volume")) {
-    m_clippedSinks.insert(sink);
-    if (visibility()) {
-      sink->addClippingPlane(m_clippingPlane);
-    }
-  }
+  refreshClippedSinks();
 
   auto* pip = qobject_cast<Pipeline*>(parent());
   if (pip) {
@@ -1158,30 +1155,31 @@ void ClipSink::disconnectFromSiblings()
   }
 }
 
-void ClipSink::onPipelineLinkCreated(Link* link)
+void ClipSink::refreshClippedSinks(const Link* removed)
 {
-  if (!link || link->from() != m_upstreamPort) {
-    return;
+  // Clip every display of the same data, whether it hangs off the data
+  // port itself or sits in a Visualizations group, on either side.
+  auto wanted = displaysOf(dataPort(m_upstreamPort, removed), removed);
+  wanted.remove(this);
+  for (auto* sink : m_clippedSinks - wanted) {
+    sink->removeClippingPlane(m_clippingPlane);
   }
-  auto* sink = qobject_cast<LegacyModuleSink*>(link->to()->node());
-  if (sink && sink != this && !m_clippedSinks.contains(sink)) {
-    m_clippedSinks.insert(sink);
+  for (auto* sink : wanted - m_clippedSinks) {
     if (visibility()) {
       sink->addClippingPlane(m_clippingPlane);
     }
   }
+  m_clippedSinks = wanted;
+}
+
+void ClipSink::onPipelineLinkCreated(Link*)
+{
+  refreshClippedSinks();
 }
 
 void ClipSink::onPipelineLinkRemoved(Link* link)
 {
-  if (!link || link->from() != m_upstreamPort) {
-    return;
-  }
-  auto* sink = qobject_cast<LegacyModuleSink*>(link->to()->node());
-  if (sink && m_clippedSinks.contains(sink)) {
-    sink->removeClippingPlane(m_clippingPlane);
-    m_clippedSinks.remove(sink);
-  }
+  refreshClippedSinks(link);
 }
 
 void ClipSink::onMetadataChanged()

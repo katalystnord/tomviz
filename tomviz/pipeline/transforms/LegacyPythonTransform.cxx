@@ -384,9 +384,12 @@ void LegacyPythonTransform::parseJSON(bool createPorts, bool applyLabel)
       QJsonValue defaultVal = param.value("default");
 
       // Dataset parameters become additional input ports, not parameters.
+      // With "optional": true the port may stay unconnected and the
+      // operator gets its Python default (None) for it.
       if (type == "dataset") {
         if (createPorts) {
-          addInput(name, PortType::ImageData);
+          auto* port = addInput(name, PortType::ImageData);
+          port->setOptional(param.value("optional").toBool(false));
         }
         m_datasetInputNames.append(name);
         continue;

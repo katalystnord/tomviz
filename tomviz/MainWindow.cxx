@@ -60,6 +60,7 @@
 #include "pipeline/OutputPort.h"
 #include "pipeline/PassthroughOutputPort.h"
 #include "pipeline/InputPort.h"
+#include "pipeline/PipelineUtils.h"
 #include "pipeline/Link.h"
 #include "pipeline/PortData.h"
 #include "pipeline/PortDataMetadata.h"
@@ -393,12 +394,16 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
               return;
             }
 
-            // Check if all inputs on the destination node are connected.
-            // Don't execute until they are.
+            // A dataset wired only into an operator's extra input (a flat
+            // field, say) is a reference image: hide its own displays.
+            pipeline::hideDisplaysOfAuxiliaryInput(link);
+
+            // Check if all required inputs on the destination node are
+            // connected. Don't execute until they are.
             auto* destNode = to->node();
             bool allConnected = true;
             for (auto* input : destNode->inputPorts()) {
-              if (!input->link()) {
+              if (!input->link() && !input->isOptional()) {
                 allConnected = false;
                 break;
               }

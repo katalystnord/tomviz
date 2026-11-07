@@ -589,6 +589,21 @@ void PipelineStripWidget::setLinkValidator(LinkValidator validator)
   m_linkValidator = std::move(validator);
 }
 
+namespace {
+
+// The expand toggle opens a node's output ports, or a group's members.
+// An empty group has nothing to open, so it gets no toggle.
+bool hasExpandToggle(Node* node)
+{
+  if (node->outputPorts().isEmpty()) {
+    return false;
+  }
+  auto* group = qobject_cast<SinkGroupNode*>(node);
+  return !group || !group->sinks().isEmpty();
+}
+
+} // namespace
+
 bool PipelineStripWidget::isExpanded(Node* node) const
 {
   return m_expandedNodes.contains(node);
@@ -1207,6 +1222,20 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
     }
     return tr("Output port: %1").arg(portTypeToString(outPort->type()));
   }
+  if (auto* inPort = inputPortHitTest(pos)) {
+    if (auto* link = inPort->link()) {
+      auto* from = link->from() ? link->from()->node() : nullptr;
+      return tr("Input '%1', from %2")
+        .arg(inPort->name(), from ? from->label() : tr("nothing"));
+    }
+    if (inPort->isOptional()) {
+      return tr("Optional input '%1', not connected: drag an output port "
+                "onto it to use it")
+        .arg(inPort->name());
+    }
+    return tr("Input '%1' is not connected: drag an output port onto it")
+      .arg(inPort->name());
+  }
   if (linkHitTest(pos)) {
     return tr("Link");
   }
@@ -1216,6 +1245,22 @@ QString PipelineStripWidget::tooltipAt(const QPoint& pos) const
     // Expanded output ports (port cards) get the same tooltip as the dots.
     if (item.type == LayoutItem::PortCard && item.port) {
       return tr("Output port: %1").arg(portTypeToString(item.port->type()));
+    }
+    // State icon: say which inputs still need connecting.
+    if (item.type == LayoutItem::NodeCard && item.node &&
+        menuButtonRect(item.rect)
+          .translated(-(HeaderButtonSpacing + HeaderIconSize), 0)
+          .contains(pos)) {
+      QStringList missing;
+      for (auto* input : item.node->inputPorts()) {
+        if (!input->link() && !input->isOptional()) {
+          missing << QStringLiteral("'%1'").arg(input->name());
+        }
+      }
+      if (!missing.isEmpty()) {
+        return tr("Cannot run until input %1 is connected")
+          .arg(missing.join(QStringLiteral(", ")));
+      }
     }
     // Periodic-execution button in the node header.
     if (item.type == LayoutItem::NodeCard && item.node &&
@@ -1490,7 +1535,7 @@ void PipelineStripWidget::paintNodeCard(QPainter& painter,
   painter.drawLine(sepX, sepTop, sepX, sepBot);
 
   // Expand toggle for nodes with output ports
-  if (!outputs.isEmpty()) {
+  if (hasExpandToggle(node)) {
     bool expanded = m_expandedNodes.contains(node);
     QColor arrowColor = fg;
     painter.setBrush(Qt::NoBrush);
@@ -2926,14 +2971,14 @@ void PipelineStripWidget::mousePressEvent(QMouseEvent* event)
 
       // Expand toggle (rightmost area) or action button
       auto outputs = node->outputPorts();
-      if (!outputs.isEmpty()) {
+      if (hasExpandToggle(node)) {
         int toggleX = cardRect.right() - HeaderExpandWidth - HeaderRightPad;
         if (event->pos().x() >= toggleX &&
             event->pos().x() <= cardRect.right() - HeaderRightPad) {
           setExpanded(node, !isExpanded(node));
           return;
         }
-      } else if (!node->actionIcon().isNull()) {
+      } else if (outputs.isEmpty() && !node->actionIcon().isNull()) {
         QRect actRect = actionButtonRect(cardRect);
         if (actRect.contains(event->pos())) {
           node->triggerAction();

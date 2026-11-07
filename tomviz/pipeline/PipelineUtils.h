@@ -4,10 +4,14 @@
 #ifndef tomvizPipelinePipelineUtils_h
 #define tomvizPipelinePipelineUtils_h
 
+#include <QSet>
+
 namespace tomviz {
 namespace pipeline {
 
 class InputPort;
+class LegacyModuleSink;
+class Link;
 class Node;
 class OutputPort;
 class Pipeline;
@@ -39,6 +43,24 @@ OutputPort* feedingSourcePort(Node* node);
 /// Returns nullptr when @a input does not accept @a targetPort's type.
 OutputPort* sinkAttachPort(Pipeline* pipeline, OutputPort* targetPort,
                            InputPort* input);
+
+/// The port that actually carries @a port's data: a SinkGroupNode
+/// passthrough is followed up to the port feeding the group. @a skip is
+/// a link to treat as already gone (Pipeline::linkRemoved fires while
+/// the link is still attached).
+OutputPort* dataPort(OutputPort* port, const Link* skip = nullptr);
+
+/// Every display fed by @a port, directly or through Visualizations
+/// groups, ignoring the link @a skip.
+QSet<LegacyModuleSink*> displaysOf(OutputPort* port,
+                                   const Link* skip = nullptr);
+
+/// Called when the user wires @a link into an operator's extra input (a
+/// dataset parameter such as a flat field, not its first input): if the
+/// dataset feeds nothing but such inputs, its own displays are hidden,
+/// since they are not what the user is looking at and are usually drawn
+/// at a different scale. Returns how many displays were hidden.
+int hideDisplaysOfAuxiliaryInput(Link* link);
 
 } // namespace pipeline
 } // namespace tomviz

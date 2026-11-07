@@ -13,6 +13,7 @@
 #include "SinkNode.h"
 #include "SourceNode.h"
 #include "TransformNode.h"
+#include "sinks/LegacyModuleSink.h"
 
 namespace tomviz {
 namespace pipeline {
@@ -151,6 +152,93 @@ OutputPort* sinkAttachPort(Pipeline* pipeline, OutputPort* targetPort,
   pipeline->addNode(group);
   pipeline->createLink(targetPort, group->inputPorts()[0]);
   return group->outputPorts()[0];
+}
+
+OutputPort* dataPort(OutputPort* port, const Link* skip)
+{
+  while (port) {
+    auto* group = qobject_cast<SinkGroupNode*>(port->node());
+    if (!group) {
+      break;
+    }
+    int idx = group->outputPorts().indexOf(port);
+    if (idx < 0 || idx >= group->inputPorts().size()) {
+      break;
+    }
+    auto* link = group->inputPorts()[idx]->link();
+    if (!link || link == skip) {
+      break;
+    }
+    port = link->from();
+  }
+  return port;
+}
+
+namespace {
+
+void collectDisplays(OutputPort* port, const Link* skip,
+                     QSet<LegacyModuleSink*>& out)
+{
+  for (auto* link : port->links()) {
+    if (link == skip || !link->to()) {
+      continue;
+    }
+    auto* node = link->to()->node();
+    if (auto* sink = qobject_cast<LegacyModuleSink*>(node)) {
+      out.insert(sink);
+    } else if (auto* group = qobject_cast<SinkGroupNode*>(node)) {
+      int idx = group->inputPorts().indexOf(link->to());
+      if (idx >= 0 && idx < group->outputPorts().size()) {
+        collectDisplays(group->outputPorts()[idx], skip, out);
+      }
+    }
+  }
+}
+
+// An operator's extra input: a later input port of a transform, as made
+// for dataset parameters. The first input carries the data it works on.
+bool isAuxiliaryInput(InputPort* input)
+{
+  auto* node = input ? qobject_cast<TransformNode*>(input->node()) : nullptr;
+  return node && node->inputPorts().indexOf(input) > 0;
+}
+
+} // namespace
+
+QSet<LegacyModuleSink*> displaysOf(OutputPort* port, const Link* skip)
+{
+  QSet<LegacyModuleSink*> result;
+  if (port) {
+    collectDisplays(port, skip, result);
+  }
+  return result;
+}
+
+int hideDisplaysOfAuxiliaryInput(Link* link)
+{
+  if (!link || !isAuxiliaryInput(link->to())) {
+    return 0;
+  }
+  auto* port = dataPort(link->from());
+  if (!port) {
+    return 0;
+  }
+  // Leave it alone if it also feeds a transform's main input: then it is
+  // data being worked on, not only a reference image.
+  for (auto* other : port->links()) {
+    auto* node = other->to() ? other->to()->node() : nullptr;
+    if (qobject_cast<TransformNode*>(node) && !isAuxiliaryInput(other->to())) {
+      return 0;
+    }
+  }
+  int hidden = 0;
+  for (auto* sink : displaysOf(port)) {
+    if (sink->visibility()) {
+      sink->setVisibility(false);
+      ++hidden;
+    }
+  }
+  return hidden;
 }
 
 } // namespace pipeline
