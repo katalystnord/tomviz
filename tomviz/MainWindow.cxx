@@ -747,6 +747,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("Intensity to Line Integrals (-log)");
   QAction* phaseRetrievalAction =
     preprocessingMenu->addAction("Phase Retrieval (Paganin)");
+  QAction* stitchHalfAcquisitionAction =
+    preprocessingMenu->addAction("Stitch 360-Degree Half-Acquisition");
   QAction* removeRingArtifactsAction =
     preprocessingMenu->addAction("Remove Ring Artifacts");
 
@@ -860,6 +862,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     phaseRetrievalAction, "Phase Retrieval (Paganin)",
     readInPythonScript("PhaseRetrievalPaganin"),
     readInJSONDescription("PhaseRetrievalPaganin"));
+  new AddPythonTransformReaction(
+    stitchHalfAcquisitionAction, "Stitch 360-Degree Half-Acquisition",
+    readInPythonScript("StitchHalfAcquisition"),
+    readInJSONDescription("StitchHalfAcquisition"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),

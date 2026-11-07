@@ -1,0 +1,18 @@
+{
+  "name": "StitchHalfAcquisition",
+  "label": "Stitch 360-Degree Half-Acquisition",
+  "description": "Join a 360 degree scan taken with the rotation axis near one edge of the detector (half-acquisition, offset axis, used to image samples wider than the field of view) into a 180 degree scan with the axis at the centre and nearly twice the width. Each projection is joined with the mirrored one 180 degrees later, blended linearly where they overlap. Parallel beams (synchrotrons). Reconstruct the result with any parallel-beam method.",
+  "externalCompatible": true,
+  "parameters": [
+    {
+      "name": "axis_offset",
+      "label": "Rotation Axis Offset (pixels, 0 = find it)",
+      "description": "Where the rotation axis projects, in pixels from the detector centre (positive towards higher y). 0 finds it by matching each projection with the mirrored one 180 degrees later over their overlap.",
+      "type": "double",
+      "default": 0.0,
+      "minimum": -100000.0,
+      "maximum": 100000.0,
+      "precision": 2
+    }
+  ]
+}
