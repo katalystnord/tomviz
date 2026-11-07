@@ -579,6 +579,7 @@ set(python_files
   PyStackRegImageAlignment.py
   ctf_correct.py
   PhaseRetrievalPaganin.py
+  StitchHalfAcquisition.py
   Recon_DFT.py
   Recon_DFT_constraint.py
   Recon_WBP.py
@@ -690,6 +691,7 @@ set(json_files
   GenerateTiltSeries.json
   ctf_correct.json
   PhaseRetrievalPaganin.json
+  StitchHalfAcquisition.json
   Recon_ART.json
   Recon_DFT.json
   Recon_DFT_constraint.json

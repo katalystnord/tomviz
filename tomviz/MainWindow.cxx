@@ -737,6 +737,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("CTF Correction");
   QAction* phaseRetrievalAction =
     preprocessingMenu->addAction("Phase Retrieval (Paganin)");
+  QAction* stitchHalfAcquisitionAction =
+    preprocessingMenu->addAction("Stitch 360-Degree Half-Acquisition");
 
   // === Alignment submenu ===
   QMenu* alignmentMenu = m_ui->menuTomography->addMenu("Alignment");
@@ -830,6 +832,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     phaseRetrievalAction, "Phase Retrieval (Paganin)",
     readInPythonScript("PhaseRetrievalPaganin"),
     readInJSONDescription("PhaseRetrievalPaganin"));
+  new AddPythonTransformReaction(
+    stitchHalfAcquisitionAction, "Stitch 360-Degree Half-Acquisition",
+    readInPythonScript("StitchHalfAcquisition"),
+    readInJSONDescription("StitchHalfAcquisition"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),
