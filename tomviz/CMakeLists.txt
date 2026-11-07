@@ -897,6 +897,7 @@ set(tomviz_python_projectors_modules
   forward_cpu.py
   geometry.py
   phantom.py
+  siddon.py
   sirt.py
   webgpu.py
 )
