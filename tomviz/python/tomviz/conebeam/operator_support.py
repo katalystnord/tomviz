@@ -26,9 +26,64 @@ def load_geometry_vectors(path):
     return vecs
 
 
+# The scanner geometry a file reader found, stored in dataset.metadata
+# under 'geometry'. Lengths in mm, offsets in detector pixels (of the
+# detector_shape given), angles in degrees:
+#
+#   {'sod': ..., 'sdd': ..., 'pixel_size_u': ..., 'pixel_size_v': ...,
+#    'offset_u': 0.0, 'offset_v': 0.0, 'clockwise': False,
+#    'detector_shape': [n_v, n_u], 'source': 'Nikon .xtekct'}
+#
+# or, for a measured per-projection geometry, 'vectors': n rows of the 12
+# ASTRA cone_vec numbers (source, detector centre, u step, v step).
+
+
+def geometry_from_metadata(metadata, n_angles, n_u, n_v, angles_deg):
+    """The ConeGeometry a reader stored with the data. The projections
+    may have been binned since: the pixel pitch and offsets follow when
+    the detector size divides evenly."""
+    g = (metadata or {}).get('geometry')
+    if not g:
+        raise RuntimeError(
+            "This dataset carries no scanner geometry: its file format "
+            "does not store one. Choose 'Circular Orbit' and enter the "
+            "distances, or 'Vectors From File'.")
+    shape = g.get('detector_shape') or [n_v, n_u]
+    bin_v, bin_u = shape[0] / n_v, shape[1] / n_u
+    for b, axis in ((bin_v, 'rows'), (bin_u, 'columns')):
+        if abs(b - round(b)) > 1e-9 or round(b) < 1:
+            raise RuntimeError(
+                f'The projections have {n_v} x {n_u} pixels but the scanner '
+                f'geometry is for {shape[0]} x {shape[1]}; the detector '
+                f'{axis} were cropped, so the stored geometry no longer '
+                "fits. Use 'Circular Orbit' with the right values.")
+    bin_v, bin_u = round(bin_v), round(bin_u)
+    if 'vectors' in g:
+        vecs = np.asarray(g['vectors'], dtype=np.float64)
+        if vecs.shape != (n_angles, 12):
+            raise RuntimeError(f'The stored geometry has {len(vecs)} '
+                               f'projections, the data {n_angles}')
+        vecs = vecs.copy()
+        vecs[:, 6:9] *= bin_u
+        vecs[:, 9:12] *= bin_v
+        return ConeGeometry.from_astra_vectors(vecs, n_u, n_v)
+    angles = g.get('angles', angles_deg)
+    if angles is None or len(angles) != n_angles:
+        raise RuntimeError('Every projection needs a tilt angle (degrees)')
+    return ConeGeometry.circular(
+        angles, float(g['sod']), float(g['sdd']),
+        float(g['pixel_size_u']) * bin_u, float(g['pixel_size_v']) * bin_v,
+        n_u, n_v, offset_u=float(g.get('offset_u', 0.0)) / bin_u,
+        offset_v=float(g.get('offset_v', 0.0)) / bin_v,
+        clockwise=bool(g.get('clockwise', False)))
+
+
 def build_geometry(n_angles, n_u, n_v, angles_deg, geometry_source, sod,
                    sdd, pixel_size, offset_u, offset_v, clockwise,
-                   geometry_file):
+                   geometry_file, metadata=None):
+    if geometry_source == 'metadata':
+        return geometry_from_metadata(metadata, n_angles, n_u, n_v,
+                                      angles_deg)
     if geometry_source == 'file':
         vecs = load_geometry_vectors(geometry_file)
         if len(vecs) != n_angles:

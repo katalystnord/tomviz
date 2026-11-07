@@ -19,7 +19,8 @@ class ReconConeBeamSIRTOperator(tomviz.operators.CompletableOperator):
             geom = build_geometry(
                 n_angles, n_u, n_v, dataset.tilt_angles, geometry_source,
                 sod, sdd, pixel_size, offset_u, offset_v, clockwise,
-                geometry_file)
+                geometry_file,
+                metadata=getattr(dataset, 'metadata', None))
             vol_geom = build_volume(geom, volume_size_xy, volume_size_axial,
                                     voxel_size)
         except ValueError as e:

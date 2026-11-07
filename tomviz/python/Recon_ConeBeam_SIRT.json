@@ -1,7 +1,7 @@
 {
   "name": "ReconstructConeBeamSIRT",
   "label": "Cone-Beam SIRT",
-  "description": "Reconstruct cone-beam X-ray CT projections (lab and industrial scanners with a point source and a flat-panel detector) with the Simultaneous Iterative Reconstruction Technique (SIRT). Slower than FDK, but better with few projections, short or irregular scans, and noisy data.\n\nThe input must be line integrals (use Flat/Dark Field Correction or Intensity to Line Integrals first). Each projection is an image in the x-y plane, with x parallel to the rotation axis; the projection angles are the tilt angles, in degrees.\n\nThe geometry is either a circular orbit described below, or a measured per-projection geometry loaded from a text file with one row of 12 numbers per projection (source, detector centre, detector u step, detector v step; the ASTRA cone_vec layout).\n\nFinishing early keeps the reconstruction so far. The output volume has x along the rotation axis and voxel spacing in the same units as the distances.",
+  "description": "Reconstruct cone-beam X-ray CT projections (lab and industrial scanners with a point source and a flat-panel detector) with the Simultaneous Iterative Reconstruction Technique (SIRT). Slower than FDK, but better with few projections, short or irregular scans, and noisy data.\n\nThe input must be line integrals (use Flat/Dark Field Correction or Intensity to Line Integrals first). Each projection is an image in the x-y plane, with x parallel to the rotation axis; the projection angles are the tilt angles, in degrees.\n\nThe geometry comes from the data when its file reader stored the scanner geometry (From the Data), or is a circular orbit described below, or a measured per-projection geometry loaded from a text file with one row of 12 numbers per projection (source, detector centre, detector u step, detector v step; the ASTRA cone_vec layout).\n\nFinishing early keeps the reconstruction so far. The output volume has x along the rotation axis and voxel spacing in the same units as the distances.",
   "children": [
     {
       "name": "reconstruction",
@@ -15,7 +15,11 @@
       "label": "Geometry",
       "type": "enumeration",
       "default": 0,
+      "description": "From the Data uses the scanner geometry stored with the projections by their file reader (Nikon, ZEISS, Waygate, Bruker and similar). Otherwise enter a circular orbit, or load per-projection vectors.",
       "options": [
+        {
+          "From the Data": "metadata"
+        },
         {
           "Circular Orbit": "circular"
         },

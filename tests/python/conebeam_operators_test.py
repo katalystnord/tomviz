@@ -212,3 +212,42 @@ def test_fdk_operator_leaves_single_row_input_alone(phantom):
     ds = make_dataset(tilt.copy(order='F'), ANGLES)
     run_fdk(ds, volume_size_xy=40, volume_size_axial=1, voxel_size=0.5)
     np.testing.assert_array_equal(ds.active_scalars, tilt)
+
+
+GEOMETRY = {'sod': SOD, 'sdd': SDD, 'pixel_size_u': PITCH,
+            'pixel_size_v': PITCH, 'offset_u': 0.0, 'offset_v': 0.0,
+            'detector_shape': [N_V, N_U], 'source': 'test'}
+
+
+def test_fdk_operator_geometry_from_the_data(line_integrals):
+    typed = run_fdk(make_dataset(to_tomviz(line_integrals), ANGLES),
+                    volume_size_xy=32, volume_size_axial=28,
+                    voxel_size=0.5)['reconstruction'].active_scalars
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    ds.metadata = {'geometry': dict(GEOMETRY)}
+    stored = run_fdk(ds, geometry_source='metadata', sod=1.0, sdd=2.0,
+                     pixel_size=9.0, volume_size_xy=32, volume_size_axial=28,
+                     voxel_size=0.5)['reconstruction'].active_scalars
+    np.testing.assert_allclose(stored, typed, atol=1e-6)
+
+
+def test_geometry_from_the_data_follows_binning():
+    from tomviz.conebeam.operator_support import geometry_from_metadata
+    g = dict(GEOMETRY, offset_u=4.0, offset_v=-2.0)
+    full = geometry_from_metadata({'geometry': g}, len(ANGLES), N_U, N_V,
+                                  ANGLES)
+    binned = geometry_from_metadata({'geometry': g}, len(ANGLES), N_U // 2,
+                                    N_V // 2, ANGLES)
+    np.testing.assert_allclose(binned.det_u, 2 * full.det_u)
+    np.testing.assert_allclose(binned.det_v, 2 * full.det_v)
+    # The physical detector position does not change with binning.
+    np.testing.assert_allclose(binned.det_center, full.det_center)
+
+
+def test_geometry_from_the_data_refuses_missing_or_cropped(line_integrals):
+    ds = make_dataset(to_tomviz(line_integrals), ANGLES)
+    with pytest.raises(RuntimeError, match='carries no scanner geometry'):
+        run_fdk(ds, geometry_source='metadata')
+    ds.metadata = {'geometry': dict(GEOMETRY, detector_shape=[N_V, N_U + 3])}
+    with pytest.raises(RuntimeError, match='were cropped'):
+        run_fdk(ds, geometry_source='metadata')
