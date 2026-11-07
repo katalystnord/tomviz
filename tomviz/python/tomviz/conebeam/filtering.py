@@ -216,21 +216,33 @@ def preweight_and_filter(projections, geom, filter_name='ram-lak',
     uv = np.einsum('ij,ij->i', geom.det_u, geom.det_v)
     H = H.astype(np.complex64)
 
+    cos_key, cos_w = None, None
     for k in range(geom.n_angles):
-        # Squared distance of each pixel from the principal point, in
-        # world units: |a U + b V|^2 = a^2 U.U + 2 a b U.V + b^2 V.V, from
-        # 1D offsets a, b (separable, so no (v, u, 3) temporaries).
-        a = iu - pu[k]
-        b = iv - pv[k]
-        r2 = ((a * a * uu[k])[None, :] + (b * b * vv[k])[:, None] +
-              (2 * uv[k] * b)[:, None] * a[None, :])
-        cos_w = (sdd[k] / np.sqrt(sdd[k] ** 2 + r2)).astype(np.float32)
-        row = proj[k] * cos_w * red[k][None, :].astype(np.float32)
-        # Sample spacing on the virtual detector through the axis.
+        # The cosine weight depends on the principal point, the distance
+        # and the pixel steps, which on a circular orbit are the same for
+        # every projection: compute it again only when they change (beyond
+        # rounding: computed per view, they differ by about 1e-12).
+        key = np.array([pu[k], pv[k], sdd[k], uu[k], vv[k], uv[k]])
+        if cos_key is None or not (
+                np.all(np.abs(key[:2] - cos_key[:2]) < 1e-6) and
+                np.allclose(key[2:], cos_key[2:], rtol=1e-9, atol=0)):
+            # Squared distance of each pixel from the principal point:
+            # |a U + b V|^2 = a^2 U.U + 2 a b U.V + b^2 V.V, from 1D
+            # offsets a, b (separable, so no (v, u, 3) temporaries).
+            a = iu - pu[k]
+            b = iv - pv[k]
+            r2 = ((a * a * uu[k])[None, :] + (b * b * vv[k])[:, None] +
+                  (2 * uv[k] * b)[:, None] * a[None, :])
+            cos_w = (sdd[k] / np.sqrt(sdd[k] ** 2 + r2)).astype(np.float32)
+            cos_key = key
+        # Sample spacing on the virtual detector through the axis; the
+        # angular step and this spacing scale the whole projection, so
+        # they join the per-column redundancy weight in one multiply.
         tau = pitch_u[k] * sod[k] / sdd[k]
-        F = _fft.rfft(row.astype(np.float32, copy=False), n=n_fft, axis=1,
-                      **_FFT_KW)
+        column = (red[k] * (dbeta[k] / tau)).astype(np.float32)
+        row = proj[k] * cos_w
+        row *= column[None, :]
+        F = _fft.rfft(row, n=n_fft, axis=1, **_FFT_KW)
         F *= H
-        filt = _fft.irfft(F, n=n_fft, axis=1, **_FFT_KW)[:, :geom.n_u]
-        out[k] = filt * (dbeta[k] / tau)
+        out[k] = _fft.irfft(F, n=n_fft, axis=1, **_FFT_KW)[:, :geom.n_u]
     return out, note
