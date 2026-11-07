@@ -19,22 +19,41 @@ PythonReader::PythonReader()
 
 vtkSmartPointer<vtkImageData> PythonReader::read(QString fileName)
 {
+  return readAll(fileName).data;
+}
+
+namespace {
+vtkSmartPointer<vtkImageData> toImage(Python::Object obj)
+{
+  if (!obj.isValid()) {
+    return nullptr;
+  }
+  vtkObjectBase* vtkobject =
+    Python::VTK::GetPointerFromObject(obj, "vtkImageData");
+  return vtkImageData::SafeDownCast(vtkobject);
+}
+} // namespace
+
+PythonReadResult PythonReader::readAll(QString fileName)
+{
+  PythonReadResult result;
   if (!m_instance.isValid()) {
     qWarning() << "The Python reader for this file type hasn't loaded yet. "
                   "Please try again in a few seconds";
-    return nullptr;
+    return result;
   }
 
   Python python;
   auto module = python.import("tomviz.io._internal");
   if (!module.isValid()) {
     qCritical() << "Failed to import tomviz.io._internal module.";
-    return nullptr;
+    return result;
   }
+
   auto readerFunction = module.findFunction("execute_reader");
   if (!readerFunction.isValid()) {
     qCritical() << "Failed to import tomviz.io._internal.execute_reader";
-    return nullptr;
+    return result;
   }
 
   Python::Tuple args(2);
@@ -42,28 +61,36 @@ vtkSmartPointer<vtkImageData> PythonReader::read(QString fileName)
   args.set(0, argInstance);
   Python::Object fileArg(fileName);
   args.set(1, fileArg);
+
   auto res = readerFunction.call(args);
-
-  if (!res.isValid()) {
+  if (!res.isValid() || !res.isList()) {
     qCritical("Error calling the reader");
-    return nullptr;
+    return result;
   }
 
-  vtkObjectBase* vtkobject =
-    Python::VTK::GetPointerFromObject(res, "vtkImageData");
-  if (vtkobject == nullptr) {
-    return nullptr;
+  // execute_reader returns [[name, image], ...] for the parts present:
+  // "data" first, then optionally "dark" and "flat".
+  auto parts = res.toList();
+  for (int i = 0; i < parts.length(); ++i) {
+    auto part = parts[i].toList();
+    if (part.length() != 2) {
+      continue;
+    }
+    const QString name = part[0].toString();
+    auto image = toImage(part[1]);
+    if (name == QLatin1String("data")) {
+      result.data = image;
+    } else if (name == QLatin1String("dark")) {
+      result.dark = image;
+    } else if (name == QLatin1String("flat")) {
+      result.flat = image;
+    }
   }
-
-  vtkSmartPointer<vtkImageData> imageData =
-    vtkImageData::SafeDownCast(vtkobject);
-
-  if (imageData->GetNumberOfPoints() <= 1) {
+  if (result.data && result.data->GetNumberOfPoints() <= 1) {
     qCritical() << "The file didn't contain any suitable volumetric data";
-    return nullptr;
+    result.data = nullptr;
   }
-
-  return imageData;
+  return result;
 }
 
 PythonReaderFactory::PythonReaderFactory(QString description,

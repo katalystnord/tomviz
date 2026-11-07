@@ -177,19 +177,19 @@ pipeline::SourceNode* LoadDataReaction::createSourceFromImageData(
 QList<pipeline::SourceNode*> LoadDataReaction::loadData(bool isTimeSeries)
 {
   QStringList filters;
-  filters << "Common file types (*.emd *.jpg *.jpeg *.png *.tiff *.tif *.h5 "
+  filters << "Common file types (*.emd *.jpg *.jpeg *.png *.tiff *.tif *.h5 *.nx "
              "*.hspy *.nxs *.raw *.dat *.bin *.txt *.mhd *.mha *.vti *.mrc "
-             "*.st *.rec *.ali *.xmf *.xdmf *.npy *.mat *.dcm)"
+             "*.mrcs *.st *.rec *.ali *.preali *.xmf *.xdmf *.npy *.mat *.dcm)"
           << "EMD (*.emd)"
           << "JPeg Image files (*.jpg *.jpeg)"
           << "PNG Image files (*.png)"
           << "TIFF Image files (*.tiff *.tif)"
-          << "HDF5 files (*.h5 *.hspy *.nxs)"
+          << "HDF5 files (*.h5 *.hspy *.nxs *.nx)"
           << "OME-TIFF Image files (*.ome.tif)"
           << "Raw data files (*.raw *.dat *.bin)"
           << "Meta Image files (*.mhd *.mha)"
           << "VTK ImageData Files (*.vti)"
-          << "MRC files (*.mrc *.st *.rec *.ali)"
+          << "MRC files (*.mrc *.mrcs *.st *.ali *.preali *.rec)"
           << "XDMF files (*.xmf *.xdmf)"
           << "Text files (*.txt)";
 
@@ -331,18 +331,6 @@ pipeline::SourceNode* LoadDataReaction::loadData(const QStringList& fileNames,
         source->setProperty("dataType", "tiltSeries");
       }
     }
-    // DataExchange / FXI auxiliary frames.
-    if (result.darkData) {
-      source->setProperty(
-        "darkData", QVariant::fromValue(
-                      static_cast<void*>(result.darkData.GetPointer())));
-    }
-    if (result.whiteData) {
-      source->setProperty(
-        "whiteData",
-        QVariant::fromValue(
-          static_cast<void*>(result.whiteData.GetPointer())));
-    }
     if (!result.readerProperties.isEmpty()) {
       source->setProperty(
         "readerProperties",
@@ -412,6 +400,23 @@ pipeline::SourceNode* LoadDataReaction::loadData(const QStringList& fileNames,
   if (addToPipeline) {
     LoadDataReaction::sourceNodeAdded(source, defaultModules, child,
                                       createCameraOrbit);
+    // Flat (white) and dark frames that came with the data (Data
+    // Exchange, FXI, Python readers) become datasets of their own.
+    QJsonObject partOptions;
+    if (auto* reader = qobject_cast<pipeline::ReaderSourceNode*>(source)) {
+      partOptions = reader->readerOptions();
+    }
+    const QString base = info.completeBaseName();
+    if (result.whiteData) {
+      addReferenceFrames(result.whiteData, QStringLiteral("flat"),
+                         base + QStringLiteral(" flat"), fileNames,
+                         partOptions);
+    }
+    if (result.darkData) {
+      addReferenceFrames(result.darkData, QStringLiteral("dark"),
+                         base + QStringLiteral(" dark"), fileNames,
+                         partOptions);
+    }
   }
 
   if (addToRecent && source) {
@@ -573,6 +578,25 @@ void LoadDataReaction::completeSourceSetup(pipeline::SourceNode* source,
       pip->createLink(group->outputPorts()[0], volume->inputPorts()[0]);
     }
   }
+}
+
+pipeline::SourceNode* LoadDataReaction::addReferenceFrames(
+  vtkImageData* image, const QString& part, const QString& label,
+  const QStringList& fileNames, QJsonObject readerOptions)
+{
+  auto* source = createSourceFromImageData(image, label, fileNames);
+  if (!source) {
+    return nullptr;
+  }
+  source->setProperty("fileNames", fileNames);
+  if (auto* reader = qobject_cast<pipeline::ReaderSourceNode*>(source)) {
+    readerOptions["part"] = part;
+    reader->setReaderOptions(readerOptions);
+  }
+  // A reference image, drawn at pixel scale: no default displays.
+  sourceNodeAdded(source, /*defaultModules=*/false, /*child=*/false,
+                  /*createCameraOrbit=*/false);
+  return source;
 }
 
 void LoadDataReaction::sourceNodeAdded(pipeline::SourceNode* source,

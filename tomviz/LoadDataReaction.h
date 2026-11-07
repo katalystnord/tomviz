@@ -98,6 +98,13 @@ private:
   static pipeline::SourceNode* createSourceFromImageData(
     vtkImageData* image, const QString& label,
     const QStringList& fileNames = {});
+
+  /// Open a file's flat or dark frames (@a part "flat" or "dark") as a
+  /// dataset of its own, without displays, ready to connect to Flat/Dark
+  /// Field Correction. It re-reads that part of the file on state loads.
+  static pipeline::SourceNode* addReferenceFrames(
+    vtkImageData* image, const QString& part, const QString& label,
+    const QStringList& fileNames, QJsonObject readerOptions);
 };
 } // namespace tomviz
 

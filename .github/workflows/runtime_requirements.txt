@@ -11,3 +11,6 @@ h5py
 click
 tqdm
 scikit-image
+# Lab CT scanner formats (Nikon, Waygate, SkyScan TIFFs; ZEISS OLE files)
+tifffile
+olefile

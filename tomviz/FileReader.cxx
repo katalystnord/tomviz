@@ -11,6 +11,7 @@
 #include "GenericHDF5Format.h"
 #include "LoadDataReaction.h"
 #include "PythonReader.h"
+#include "PythonUtilities.h"
 #include "Utilities.h"
 #include "vtkOMETiffReader.h"
 
@@ -19,6 +20,7 @@
 #include <vtkMRCReader.h>
 #include <vtkNew.h>
 #include <vtkPNGReader.h>
+#include <vtkPythonInterpreter.h>
 #include <vtkSMSessionProxyManager.h>
 #include <vtkSMSourceProxy.h>
 #include <vtkSmartPointer.h>
@@ -84,13 +86,120 @@ vtkSmartPointer<vtkImageData> readWithVTK(const QStringList& fileNames)
     reader->Update();
     return reader->GetOutput();
   }
-  if (ext == "mrc") {
-    auto reader = vtkSmartPointer<vtkMRCReader>::New();
-    reader->SetFileName(path.c_str());
-    reader->Update();
-    return reader->GetOutput();
-  }
   return nullptr;
+}
+
+/// File extensions of MRC stacks and volumes (IMOD's names included).
+bool isMrc(const QString& suffix)
+{
+  static const QStringList mrc = { "mrc", "mrcs", "st",
+                                   "ali", "preali", "rec" };
+  return mrc.contains(suffix);
+}
+
+/// Tilt angles for an MRC tilt series, from its extended header or the
+/// IMOD/SerialEM files next to it (tomviz.io.mrc_tilts), or none.
+QVector<double> mrcTiltAngles(const QString& fileName, int count)
+{
+  QVector<double> angles;
+  if (!vtkPythonInterpreter::IsInitialized()) {
+    return angles;
+  }
+  Python python;
+  auto module = python.import("tomviz.io.mrc_tilts");
+  if (!module.isValid()) {
+    return angles;
+  }
+  auto function = module.findFunction("tilt_angles");
+  if (!function.isValid()) {
+    return angles;
+  }
+  Python::Tuple args(2);
+  Python::Object file(fileName);
+  args.set(0, file);
+  args.set(1, Variant(count));
+  auto res = function.call(args);
+  if (!res.isValid() || !res.isList()) {
+    Python::checkForPythonError();
+    return angles;
+  }
+  auto list = res.toList();
+  for (int i = 0; i < list.length(); ++i) {
+    angles.append(list[i].toDouble());
+  }
+  return angles;
+}
+
+/// Read with a Python reader that recognises its own files:
+/// tomviz.io.formats.<module>.<check>(path) says whether the file is one
+/// of them, and <reader> reads it (data, and flat and dark frames when
+/// present). False when the file is not one of them, or Python is not
+/// running, so other readers can try.
+bool readWithPythonFormat(const QString& moduleName, const QString& check,
+                          const QString& readerName, const QString& fileName,
+                          ReadResult& result)
+{
+  if (!vtkPythonInterpreter::IsInitialized()) {
+    return false;
+  }
+  Python python;
+  auto module = python.import("tomviz.io.formats." + moduleName);
+  if (!module.isValid()) {
+    return false;
+  }
+  auto checkFunction = module.findFunction(check);
+  if (!checkFunction.isValid()) {
+    return false;
+  }
+  Python::Tuple args(1);
+  Python::Object file(fileName);
+  args.set(0, file);
+  auto isOne = checkFunction.call(args);
+  if (!isOne.isValid() || !isOne.toBool()) {
+    Python::checkForPythonError();
+    return false;
+  }
+  auto cls = module.findFunction(readerName);
+  auto instance = cls.isValid() ? cls.call() : Python::Object();
+  if (!instance.isValid()) {
+    Python::checkForPythonError();
+    return false;
+  }
+  auto parts = PythonReader(instance).readAll(fileName);
+  if (!parts.data) {
+    return false;
+  }
+  result.imageData = parts.data;
+  result.darkData = parts.dark;
+  result.whiteData = parts.flat;
+  return true;
+}
+
+/// An MRC file: the image (spacing converted from the Angstrom MRC uses to
+/// the nanometres Tomviz uses) and, for a tilt series, its angles.
+ReadResult readMrc(const QString& fileName)
+{
+  ReadResult result;
+  auto reader = vtkSmartPointer<vtkMRCReader>::New();
+  reader->SetFileName(fileName.toLocal8Bit().constData());
+  reader->Update();
+  vtkSmartPointer<vtkImageData> image = reader->GetOutput();
+  if (!image || image->GetNumberOfPoints() == 0) {
+    return result;
+  }
+  double spacing[3];
+  image->GetSpacing(spacing);
+  image->SetSpacing(spacing[0] * 0.1, spacing[1] * 0.1, spacing[2] * 0.1);
+  result.imageData = image;
+  int dims[3];
+  image->GetDimensions(dims);
+  // IMOD's .rec is a reconstructed volume; it often sits next to the
+  // .rawtlt of its tilt series, so do not look for angles for it.
+  const bool volume = QFileInfo(fileName).suffix().toLower() == "rec";
+  if (dims[2] > 1 && !volume) {
+    result.tiltAngles = mrcTiltAngles(fileName, dims[2]);
+  }
+  return result;
 }
 
 QVariantMap hdf5OptionsFromJson(const QJsonObject& options)
@@ -110,7 +219,31 @@ QVariantMap hdf5OptionsFromJson(const QJsonObject& options)
 
 } // namespace
 
+namespace {
+ReadResult readAllParts(const QStringList& fileNames,
+                        const QJsonObject& options);
+} // namespace
+
 ReadResult readImageData(const QStringList& fileNames,
+                         const QJsonObject& options)
+{
+  ReadResult result = readAllParts(fileNames, options);
+  // options["part"] picks a file's flat or dark frames instead of its
+  // data, so those can be datasets of their own that re-read themselves.
+  const QString part = options.value("part").toString();
+  if (part.isEmpty() || part == QLatin1String("data")) {
+    return result;
+  }
+  ReadResult partResult;
+  partResult.imageData =
+    part == QLatin1String("flat") ? result.whiteData : result.darkData;
+  partResult.readerProperties = result.readerProperties;
+  return partResult;
+}
+
+namespace {
+
+ReadResult readAllParts(const QStringList& fileNames,
                          const QJsonObject& options)
 {
   ReadResult result;
@@ -139,8 +272,12 @@ ReadResult readImageData(const QStringList& fileNames,
     return result;
   }
 
-  // .emd — simple EMD reader.
+  // .emd — Thermo Fisher Velox, else the (Berkeley) EMD reader.
   if (suffix == "emd") {
+    if (readWithPythonFormat("velox", "is_velox", "VeloxReader", fileName,
+                             result)) {
+      return result;
+    }
     QVariantMap emdOptions = hdf5OptionsFromJson(options);
     vtkNew<vtkImageData> imageData;
     if (EmdFormat::read(fileName.toLatin1().data(), imageData, emdOptions)) {
@@ -151,9 +288,15 @@ ReadResult readImageData(const QStringList& fileNames,
 
   // .hspy / .h5 / .nxs — DataExchange / FXI / generic HDF5. NeXus
   // files are HDF5 underneath, so they go through the same readers.
-  if (suffix == "hspy" || suffix == "h5" || suffix == "nxs") {
+  if (suffix == "hspy" || suffix == "h5" || suffix == "nxs" ||
+      suffix == "nx") {
     QVariantMap hdf5Options = hdf5OptionsFromJson(options);
     const auto fnStd = fileName.toStdString();
+    // NeXus NXtomo (ESRF, Diamond): projections, flats and darks.
+    if (readWithPythonFormat("nxtomo", "is_nxtomo", "NXtomoReader",
+                             fileName, result)) {
+      return result;
+    }
     if (GenericHDF5Format::isDataExchange(fnStd)) {
       DataExchangeFormat format;
       auto r = format.readAll(fileName.toLatin1().data(), hdf5Options);
@@ -197,10 +340,14 @@ ReadResult readImageData(const QStringList& fileNames,
     return result;
   }
 
+  // MRC stacks and volumes, with tilt angles when they are a tilt series.
+  if (isMrc(suffix)) {
+    return readMrc(fileName);
+  }
+
   // Simple VTK-readable formats — direct, no dialog.
   if (suffix == "tif" || suffix == "tiff" || suffix == "png" ||
-      suffix == "jpg" || suffix == "jpeg" || suffix == "vti" ||
-      suffix == "mrc") {
+      suffix == "jpg" || suffix == "jpeg" || suffix == "vti") {
     result.imageData = readWithVTK(fileNames);
     return result;
   }
@@ -209,9 +356,11 @@ ReadResult readImageData(const QStringList& fileNames,
   if (FileFormatManager::instance().pythonReaderFactory(suffix) != nullptr) {
     auto factory = FileFormatManager::instance().pythonReaderFactory(suffix);
     auto reader = factory->createReader();
-    auto imageData = reader.read(fileNames[0]);
-    if (imageData) {
-      result.imageData = imageData;
+    auto parts = reader.readAll(fileNames[0]);
+    if (parts.data) {
+      result.imageData = parts.data;
+      result.darkData = parts.dark;
+      result.whiteData = parts.flat;
     }
     return result;
   }
@@ -253,5 +402,7 @@ ReadResult readImageData(const QStringList& fileNames,
   // No headless path — caller must fall back to interactive load.
   return result;
 }
+
+} // namespace
 
 } // namespace tomviz

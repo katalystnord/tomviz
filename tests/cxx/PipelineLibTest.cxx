@@ -49,6 +49,8 @@
 #include "NodeFactory.h"
 #include "sources/PythonSource.h"
 #include "sources/SphereSource.h"
+#include "FileReader.h"
+#include "PythonReader.h"
 #include "sources/ReaderSourceNode.h"
 #include "transforms/ThresholdTransform.h"
 #include "transforms/LegacyPythonTransform.h"
@@ -1775,6 +1777,246 @@ sys.modules["test_vti_reader"] = mod
   EXPECT_EQ(dims[0], 4);
   EXPECT_EQ(dims[1], 5);
   EXPECT_EQ(dims[2], 6);
+}
+
+TEST_F(PipelinePythonTest, PythonReaderWithReferenceFrames)
+{
+  // A Python reader may return projections with tilt angles and metadata
+  // plus flat and dark frames; all of it must reach the C++ side.
+  using tomviz::Python;
+  using tomviz::PythonReaderFactory;
+
+  Python::Object readerClass;
+  {
+    py::gil_scoped_acquire gil;
+    py::module_ mod = py::module_::import("types").attr("ModuleType")(
+      "test_reference_reader");
+    py::exec(R"(
+import numpy as np
+from tomviz.io import image_from_frames
+
+class ReferenceReader:
+    def read(self, path):
+        frames = np.arange(4 * 3 * 5, dtype=np.float32).reshape(4, 3, 5)
+        return {
+            'data': image_from_frames(frames, (0.5, 0.5),
+                                      angles=[0, 90, 180, 270],
+                                      metadata={'geometry': {'sod': 66.0}}),
+            'flat': image_from_frames(np.full((3, 5), 7.0, np.float32)),
+            'dark': image_from_frames(np.full((2, 3, 5), 1.0, np.float32)),
+        }
+)",
+             mod.attr("__dict__"));
+    readerClass = Python::Object(mod.attr("ReferenceReader").ptr());
+  }
+  PythonReaderFactory factory("Reference test", { "tvreftest" }, readerClass);
+  auto parts = factory.createReader().readAll("unused.tvreftest");
+
+  ASSERT_TRUE(parts.data);
+  int dims[3];
+  parts.data->GetDimensions(dims);
+  EXPECT_EQ(dims[0], 3); // rows, along the rotation axis
+  EXPECT_EQ(dims[1], 5); // columns
+  EXPECT_EQ(dims[2], 4); // projections
+  EXPECT_EQ(VolumeData::getTiltAngles(parts.data),
+            QVector<double>({ 0, 90, 180, 270 }));
+  EXPECT_DOUBLE_EQ(parts.data->GetSpacing()[0], 0.5);
+  auto* meta =
+    parts.data->GetFieldData()->GetAbstractArray("tomviz_metadata");
+  ASSERT_NE(meta, nullptr);
+  EXPECT_NE(meta->GetVariantValue(0).ToString().find("\"sod\": 66.0"),
+            std::string::npos);
+  ASSERT_TRUE(parts.flat);
+  EXPECT_EQ(parts.flat->GetScalarRange()[1], 7.0);
+  ASSERT_TRUE(parts.dark);
+  parts.dark->GetDimensions(dims);
+  EXPECT_EQ(dims[2], 2);
+  EXPECT_FALSE(VolumeData::hasTiltAngles(parts.flat));
+
+  // A plain image, as older readers return, still works.
+  {
+    py::gil_scoped_acquire gil;
+    py::module_ mod = py::module_::import("types").attr("ModuleType")(
+      "test_plain_reader");
+    py::exec(R"(
+import numpy as np
+from tomviz.io import image_from_array
+
+class PlainReader:
+    def read(self, path):
+        return image_from_array(np.ones((2, 3, 4), np.float32))
+)",
+             mod.attr("__dict__"));
+    readerClass = Python::Object(mod.attr("PlainReader").ptr());
+  }
+  PythonReaderFactory plain("Plain test", { "tvplain" }, readerClass);
+  auto plainParts = plain.createReader().readAll("unused.tvplain");
+  ASSERT_TRUE(plainParts.data);
+  EXPECT_FALSE(plainParts.flat);
+  EXPECT_FALSE(plainParts.dark);
+}
+
+TEST_F(PipelinePythonTest, MrcTiltSeriesGetsAnglesAndNanometres)
+{
+  // An IMOD stack (.st) with its .rawtlt opens as a tilt series with
+  // nm spacing (MRC stores Angstrom); a .rec next to the same .rawtlt is
+  // a volume and gets no angles.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["folder"] = dir.path().toStdString();
+    py::exec(R"(
+import os, struct
+import numpy as np
+def write(name, nz):
+    h = bytearray(1024)
+    struct.pack_into('<4i', h, 0, 4, 3, nz, 2)
+    struct.pack_into('<3i', h, 28, 4, 3, nz)
+    struct.pack_into('<3f', h, 40, 40.0, 30.0, 10.0 * nz)
+    h[208:212] = b'MAP '
+    h[212:214] = b'\x44\x44'
+    with open(os.path.join(folder, name), 'wb') as f:
+        f.write(bytes(h) + np.ones((nz, 3, 4), '<f4').tobytes())
+write('tilts.st', 5)
+write('tilts.rec', 5)
+with open(os.path.join(folder, 'tilts.rawtlt'), 'w') as f:
+    f.write('-60\n-30\n0\n30\n60\n')
+)",
+             scope, scope);
+  }
+
+  auto st = tomviz::readImageData({ dir.filePath("tilts.st") });
+  ASSERT_TRUE(st.imageData);
+  EXPECT_EQ(st.tiltAngles, QVector<double>({ -60, -30, 0, 30, 60 }));
+  EXPECT_DOUBLE_EQ(st.imageData->GetSpacing()[0], 1.0); // 10 A = 1 nm
+
+  auto rec = tomviz::readImageData({ dir.filePath("tilts.rec") });
+  ASSERT_TRUE(rec.imageData);
+  EXPECT_TRUE(rec.tiltAngles.isEmpty());
+  EXPECT_DOUBLE_EQ(rec.imageData->GetSpacing()[0], 1.0);
+}
+
+TEST_F(PipelinePythonTest, NxtomoFileSplitsProjectionsFlatsAndDarks)
+{
+  // .nxs files are HDF5; an NXtomo one is recognised before the generic
+  // HDF5 reader and split by image_key into projections, flats, darks.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("scan.nxs");
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["path"] = path.toStdString();
+    py::exec(R"(
+import h5py
+import numpy as np
+keys = np.array([2, 1, 1, 0, 0, 0])
+with h5py.File(path, 'w') as f:
+    g = f.create_group('entry1/tomo_entry')
+    g['definition'] = b'NXtomo'
+    g['instrument/detector/data'] = np.stack(
+        [np.full((3, 4), 5 * k + 1, np.uint16) for k in keys])
+    g['instrument/detector/image_key'] = keys
+    g['sample/rotation_angle'] = np.array([0, 0, 0, 0, 60, 120.0])
+)",
+             scope, scope);
+  }
+  auto all = tomviz::readImageData({ path });
+  ASSERT_TRUE(all.imageData);
+  int dims[3];
+  all.imageData->GetDimensions(dims);
+  EXPECT_EQ(dims[2], 3);
+  EXPECT_EQ(VolumeData::getTiltAngles(all.imageData),
+            QVector<double>({ 0, 60, 120 }));
+  ASSERT_TRUE(all.whiteData);
+  ASSERT_TRUE(all.darkData);
+  all.whiteData->GetDimensions(dims);
+  EXPECT_EQ(dims[2], 2);
+  EXPECT_EQ(all.darkData->GetScalarRange()[1], 11.0);
+}
+
+TEST_F(PipelinePythonTest, VeloxEmdIsReadAsVelox)
+{
+  // .emd files from Thermo Fisher Velox are recognised before the
+  // (Berkeley) EMD reader; per-frame alpha tilts make a tilt series.
+  QTemporaryDir dir;
+  ASSERT_TRUE(dir.isValid());
+  const QString path = dir.filePath("tilts.emd");
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["path"] = path.toStdString();
+    py::exec(R"(
+import json
+import h5py
+import numpy as np
+tilts = np.radians([-30.0, 0.0, 30.0])
+blobs = [json.dumps({'Stage': {'AlphaTilt': str(t)}, 'BinaryResult': {
+    'PixelSize': {'width': '1e-9', 'height': '1e-9'}}}).encode()
+    for t in tilts]
+meta = np.zeros((300, 3), np.uint8)
+for i, b in enumerate(blobs):
+    meta[:len(b), i] = np.frombuffer(b, np.uint8)
+with h5py.File(path, 'w') as f:
+    f['Version'] = np.array([b'{"version": "11", "format": "Velox"}'])
+    f['Data/Image/x/Data'] = np.ones((4, 5, 3), np.int16)
+    f['Data/Image/x/Metadata'] = meta
+)",
+             scope, scope);
+  }
+  auto r = tomviz::readImageData({ path });
+  ASSERT_TRUE(r.imageData);
+  auto angles = VolumeData::getTiltAngles(r.imageData);
+  ASSERT_EQ(angles.size(), 3);
+  EXPECT_NEAR(angles[0], -30.0, 1e-9);
+  EXPECT_NEAR(angles[2], 30.0, 1e-9);
+  EXPECT_DOUBLE_EQ(r.imageData->GetSpacing()[0], 1.0);
+}
+
+TEST_F(PipelinePythonTest, ReaderSourceCanReadTheFlatOrDarkPart)
+{
+  // Flat and dark frames open as datasets of their own; on a state load
+  // such a dataset re-reads just its part of the file.
+  QTemporaryFile tmpFile("XXXXXX.h5");
+  tmpFile.setAutoRemove(true);
+  ASSERT_TRUE(tmpFile.open());
+  QString tmpPath = tmpFile.fileName();
+  tmpFile.close();
+  {
+    py::gil_scoped_acquire gil;
+    py::dict scope;
+    scope["path"] = tmpPath.toStdString();
+    py::exec(R"(
+import h5py
+import numpy as np
+with h5py.File(path, 'w') as f:
+    f['/exchange/data'] = np.full((6, 4, 5), 3.0, np.float32)
+    f['/exchange/data_white'] = np.full((2, 4, 5), 9.0, np.float32)
+    f['/exchange/data_dark'] = np.full((1, 4, 5), 1.0, np.float32)
+    f['/exchange/theta'] = np.linspace(0, 180, 6)
+)",
+             py::globals(), scope);
+  }
+
+  auto all = tomviz::readImageData({ tmpPath });
+  ASSERT_TRUE(all.imageData);
+  ASSERT_TRUE(all.whiteData);
+  ASSERT_TRUE(all.darkData);
+
+  for (const auto& [part, value] :
+       { std::pair<QString, double>{ "flat", 9.0 }, { "dark", 1.0 } }) {
+    auto* node = new ReaderSourceNode();
+    node->setFileNames({ tmpPath });
+    node->setReaderOptions({ { "part", part } });
+    pipeline->addNode(node);
+    ASSERT_TRUE(node->execute()) << part.toStdString();
+    auto vol = node->outputPort("volume")->data().value<VolumeDataPtr>();
+    ASSERT_TRUE(vol && vol->isValid());
+    EXPECT_EQ(vol->imageData()->GetScalarRange()[1], value);
+    EXPECT_FALSE(vol->hasTiltAngles());
+  }
 }
 
 // --- Schema-v2 PythonTransform / PythonSource smoke tests ---
