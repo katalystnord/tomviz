@@ -154,3 +154,66 @@ def test_gpu_ray_almost_parallel_to_slabs(smooth):
     ref = forward_project(vol, g, vg, threads=2)
     got = be.forward_project(vol, g, vg)
     np.testing.assert_allclose(got, ref, atol=2e-5 * abs(ref).max())
+
+
+@pytest.fixture(params=['texture', 'buffer'])
+def kernel(request):
+    """Each GPU forward-projection kernel in turn, whatever the adapter
+    (software adapters normally use the buffer one, GPUs the texture)."""
+    be = gpu_backend()
+    bp = be.forward_project.__self__
+    saved = bp.prefer_texture
+    bp.prefer_texture = request.param == 'texture'
+    yield be
+    bp.prefer_texture = saved
+
+
+@pytest.mark.parametrize(
+    'name', sorted(GEOMETRIES) + ['tilted cone', 'almost level'])
+def test_each_gpu_kernel_matches_cpu(smooth, kernel, name):
+    _, vg, vol = smooth
+    if name == 'tilted cone':
+        g = tilted_cone()
+    elif name == 'almost level':
+        g = ParallelGeometry.circular(np.arange(0, 180, 15.0), 0.5, 0.5,
+                                      48, 40)
+        g.ray = g.ray + np.array([0.0, 0.0, 1e-8])
+    else:
+        g = GEOMETRIES[name]()
+    ref = forward_project(vol, g, vg, threads=2)
+    for slab in (None, 7, 1):
+        got = kernel.forward_project(vol, g, vg, slab=slab)
+        np.testing.assert_allclose(got, ref, atol=2e-5 * abs(ref).max())
+
+
+def test_rays_at_45_degrees_and_off_the_volume(kernel):
+    # Rays at exactly 45 degrees (a tie between the dominant axes) and
+    # rays passing beside the volume, where the texture kernel's clipping
+    # and zero border do the work.
+    vg = VolumeGeometry((10, 12, 14), (0.5, 0.4, 0.3), center=(0.2, 0, 0))
+    vol = np.random.default_rng(3).random(vg.shape, dtype=np.float32)
+    g = ParallelGeometry.circular(np.arange(0, 360, 45.0), 0.35, 0.35, 40,
+                                  24, offset_u=2.5)
+    ref = forward_project(vol, g, vg, threads=2)
+    got = kernel.forward_project(vol, g, vg)
+    np.testing.assert_allclose(got, ref, atol=2e-5 * abs(ref).max())
+    assert np.all(got[:, :, :2] == 0)
+
+
+def test_resident_sirt_same_with_either_kernel(smooth):
+    from tomviz.projectors.sirt import sirt
+    be = gpu_backend()
+    bp = be.forward_project.__self__
+    ph, vg, _ = smooth
+    g = GEOMETRIES['cone']()
+    proj = ph.project(g).astype(np.float32)
+    saved = bp.prefer_texture
+    try:
+        out = {}
+        for k in (True, False):
+            bp.prefer_texture = k
+            out[k] = sirt(proj, g, vg, iterations=5, backend=be)
+    finally:
+        bp.prefer_texture = saved
+    np.testing.assert_allclose(out[True], out[False],
+                               atol=1e-5 * abs(out[False]).max())
