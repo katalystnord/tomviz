@@ -191,6 +191,128 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 """
 
+# The same forward projection with the volume in a 3D texture: textures
+# are stored in 3D tiles, so neighbouring rays hit the same cache lines
+# whichever axis they run along (in a storage buffer, rays running along
+# x or y read addresses nx or nx * ny floats apart, and most loads miss).
+# The texture has a border of zeros, and each ray is clipped to the
+# volume once, so the inner loop has no bounds tests. Measured 7x (parallel)
+# and 15x (cone) faster than the buffer kernel at 512^3 on an RX 9070,
+# with the same result to float rounding.
+FORWARD_TEXTURE_SHADER = """
+struct Params {
+    n_u: u32, n_v: u32, n_proj: u32, own0: i32,
+    own1: i32, pad0: i32, pad1: i32, pad2: i32,
+    size: vec4<f32>,   // nx, ny, nz of the whole volume
+    scale: vec4<f32>,  // voxel size dx, dy, dz
+    off: vec4<i32>,    // texture index = voxel index + off
+    top: vec4<i32>,    // largest texture index along each axis
+}
+
+@group(0) @binding(0) var vol: texture_3d<f32>;
+@group(0) @binding(1) var<storage, read> rays: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.n_u || gid.y >= params.n_v ||
+        gid.z >= params.n_proj) {
+        return;
+    }
+    let fu = f32(gid.x);
+    let fv = f32(gid.y);
+    let r = 6u * gid.z;
+    let o = (rays[r] + fu * rays[r + 1u] + fv * rays[r + 2u]).xyz;
+    let d = (rays[r + 3u] + fu * rays[r + 4u] + fv * rays[r + 5u]).xyz;
+    let ad = abs(d);
+    let n = params.size.xyz;
+    // Dominant axis a: one sample per plane along it (Joseph's method).
+    var a = 0u;
+    if (ad.y > ad.x && ad.y >= ad.z) {
+        a = 1u;
+    } else if (ad.z > ad.x && ad.z > ad.y) {
+        a = 2u;
+    }
+    let s = d / d[a];
+    let base = o - o[a] * s;   // where the ray meets plane 0
+    // Planes where the other coordinates lie in [-1, n]; beyond that the
+    // interpolation weights fall on the zero border or outside it.
+    var lo = 0.0;
+    var hi = n[a] - 1.0;
+    for (var i = 0u; i < 3u; i++) {
+        if (i == a) { continue; }
+        if (abs(s[i]) > 1e-12) {
+            let e1 = (-1.0 - base[i]) / s[i];
+            let e2 = (n[i] - base[i]) / s[i];
+            lo = max(lo, floor(min(e1, e2)));
+            hi = min(hi, ceil(max(e1, e2)));
+        } else if (base[i] < -1.0 || base[i] > n[i]) {
+            hi = -1.0;
+        }
+    }
+    var p0 = i32(lo);
+    var p1 = i32(hi);
+    if (a == 2u) {
+        // Only the planes this slab owns.
+        p0 = max(p0, max(params.own0, 0));
+        p1 = min(p1, params.own1 - 1);
+    }
+    var eb = vec3<i32>(0, 1, 0);
+    var ec = vec3<i32>(0, 0, 1);
+    if (a == 1u) { eb = vec3<i32>(1, 0, 0); }
+    if (a == 2u) { eb = vec3<i32>(1, 0, 0); ec = vec3<i32>(0, 1, 0); }
+    let ebf = vec3<f32>(eb);
+    let ecf = vec3<f32>(ec);
+    let off = params.off.xyz;
+    let top = params.top.xyz;
+    let zero = vec3<i32>(0);
+    var acc = 0.0;
+    for (var p = p0; p <= p1; p++) {
+        var q = base + f32(p) * s;
+        // Exactly plane p: d / d[a] need not come out as exactly 1.
+        q[a] = f32(p);
+        let f = floor(q);
+        let j = vec3<i32>(f);
+        if (a != 2u && (j.z < params.own0 || j.z >= params.own1)) {
+            continue;   // each sample belongs to the slab holding floor(z)
+        }
+        let w = q - f;
+        let wb = dot(w, ebf);
+        let wc = dot(w, ecf);
+        // Each corner clamped on its own, so any index off the volume
+        // lands on the zero border.
+        let t = j + off;
+        let v00 = textureLoad(vol, clamp(t, zero, top), 0).x;
+        let v10 = textureLoad(vol, clamp(t + eb, zero, top), 0).x;
+        let v01 = textureLoad(vol, clamp(t + ec, zero, top), 0).x;
+        let v11 = textureLoad(vol, clamp(t + eb + ec, zero, top), 0).x;
+        acc += mix(mix(v00, v10, wb), mix(v01, v11, wb), wc);
+    }
+    out[(gid.z * params.n_v + gid.y) * params.n_u + gid.x] =
+        acc * length(d * params.scale.xyz) / ad[a];
+}
+"""
+
+# SIRT's volume lives in a storage buffer (the update writes it); this
+# copies it into the forward projector's texture, inside the zero border.
+TO_TEXTURE_SHADER = """
+struct Params { nx: u32, ny: u32, nz: u32, pad: u32, }
+
+@group(0) @binding(0) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var tex: texture_storage_3d<r32float, write>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(8, 8, 4)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.nx || gid.y >= params.ny || gid.z >= params.nz) {
+        return;
+    }
+    let v = x[(gid.z * params.ny + gid.y) * params.nx + gid.x];
+    textureStore(tex, vec3<i32>(gid) + vec3<i32>(1), vec4<f32>(v));
+}
+"""
+
 # Element-wise steps of SIRT, so its whole loop can stay on the GPU.
 # residual: a = w * (c - a), with a = A x, w = R, c = b.
 # update: a = a + w * c (clipped at 0 if asked), with a = x, w = C, c = the
@@ -278,6 +400,7 @@ class WgpuBackprojector:
             'max-storage-buffer-binding-size':
                 alim['max-storage-buffer-binding-size'],
             'max-buffer-size': alim['max-buffer-size'],
+            'max-texture-dimension-3d': alim['max-texture-dimension-3d'],
         }
         self.device = adapter.request_device_sync(required_limits=want)
         lim = self.device.limits
@@ -285,12 +408,19 @@ class WgpuBackprojector:
         self.max_binding = int(min(lim['max-storage-buffer-binding-size'],
                                    lim['max-buffer-size'], 1 << 30)) // 2
         self.max_groups = int(lim['max-compute-workgroups-per-dimension'])
+        self.max_texture = int(lim['max-texture-dimension-3d'])
+        # Textures pay off on GPUs (their caches are tiled in 3D); a
+        # software adapter emulates texture addressing and measured the
+        # same or slower than the plain buffer (lavapipe, 256^3: 1.0x
+        # parallel, 0.8x cone), so it keeps the buffer kernel.
+        self.prefer_texture = adapter.info['adapter_type'] != 'CPU'
         module = self.device.create_shader_module(code=SHADER)
         self.pipeline = self.device.create_compute_pipeline(
             layout='auto', compute={'module': module, 'entry_point': 'main'})
         module = self.device.create_shader_module(code=FORWARD_SHADER)
         self.forward_pipeline = self.device.create_compute_pipeline(
             layout='auto', compute={'module': module, 'entry_point': 'main'})
+        self._make_texture_pipelines()
         module = self.device.create_shader_module(code=ELEMENTWISE_SHADER)
         self.residual_pipeline, self.update_pipeline = (
             self.device.create_compute_pipeline(
@@ -431,11 +561,174 @@ class WgpuBackprojector:
         mat_buf.destroy()
         par_buf.destroy()
 
+    def _make_texture_pipelines(self):
+        """Pipelines with explicit layouts: an r32float texture read with
+        textureLoad is 'unfilterable-float', which the automatic layout
+        would not choose."""
+        wgpu = self.wgpu
+        S = wgpu.ShaderStage.COMPUTE
+        fwd_layout = self.device.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': S,
+             'texture': {'sample_type': 'unfilterable-float',
+                         'view_dimension': '3d'}},
+            {'binding': 1, 'visibility': S,
+             'buffer': {'type': 'read-only-storage'}},
+            {'binding': 2, 'visibility': S, 'buffer': {'type': 'storage'}},
+            {'binding': 3, 'visibility': S, 'buffer': {'type': 'uniform'}},
+        ])
+        self.forward_texture_layout = fwd_layout
+        self.forward_texture_pipeline = self.device.create_compute_pipeline(
+            layout=self.device.create_pipeline_layout(
+                bind_group_layouts=[fwd_layout]),
+            compute={'module': self.device.create_shader_module(
+                code=FORWARD_TEXTURE_SHADER), 'entry_point': 'main'})
+        copy_layout = self.device.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': S,
+             'buffer': {'type': 'read-only-storage'}},
+            {'binding': 1, 'visibility': S,
+             'storage_texture': {'access': 'write-only',
+                                 'format': 'r32float',
+                                 'view_dimension': '3d'}},
+            {'binding': 2, 'visibility': S, 'buffer': {'type': 'uniform'}},
+        ])
+        self.to_texture_layout = copy_layout
+        self.to_texture_pipeline = self.device.create_compute_pipeline(
+            layout=self.device.create_pipeline_layout(
+                bind_group_layouts=[copy_layout]),
+            compute={'module': self.device.create_shader_module(
+                code=TO_TEXTURE_SHADER), 'entry_point': 'main'})
+
+    def _texture_fits(self, nx, ny, nz_slab):
+        return self.prefer_texture and \
+            max(nx + 2, ny + 2, nz_slab + 3) <= self.max_texture
+
+    def _forward_params(self, n_u, n_v, nk, shape, scale, s0, own0, own1,
+                        tex_size):
+        """The texture kernel's uniform block. The texture holds slices
+        s0 - 1 .. of the volume, with a border of one zero voxel."""
+        nz, ny, nx = shape
+        ints = np.zeros(8, dtype=np.int32)
+        ints[:5] = [n_u, n_v, nk, own0, own1]
+        floats = np.zeros(8, dtype=np.float32)
+        floats[:3] = [nx, ny, nz]
+        floats[4:7] = scale
+        vecs = np.zeros(8, dtype=np.int32)
+        vecs[:3] = [1, 1, 1 - s0]
+        vecs[4:7] = [t - 1 for t in tex_size]
+        return np.concatenate([ints.view(np.uint8), floats.view(np.uint8),
+                               vecs.view(np.uint8)])
+
     def forward_project(self, volume, geom, vol_geom, threads=None,
                         progress=None, should_stop=None, slab=None):
         """Same as forward_cpu.forward_project, on the GPU. The volume
-        streams through in slabs of z slices (plus one slice of overlap
-        for interpolation); each sample is counted in exactly one slab."""
+        streams through in slabs of z slices; each sample is counted in
+        exactly one slab. Uses the texture kernel when the slices fit
+        the device's 3D texture size, else the storage-buffer kernel."""
+        nz, ny, nx = vol_geom.shape
+        if self._texture_fits(nx, ny, 1):
+            return self._forward_texture(volume, geom, vol_geom, progress,
+                                         should_stop, slab)
+        return self._forward_buffer(volume, geom, vol_geom, progress,
+                                    should_stop, slab)
+
+    def _forward_texture(self, volume, geom, vol_geom, progress=None,
+                         should_stop=None, slab=None):
+        from .forward_cpu import index_space_rays
+        wgpu = self.wgpu
+        should_stop = should_stop or (lambda: False)
+        vol = np.ascontiguousarray(volume, dtype=np.float32)
+        if vol.shape != vol_geom.shape:
+            raise ValueError(f'Volume shape {vol.shape} does not match '
+                             f'{vol_geom.shape}')
+        nz, ny, nx = vol.shape
+        n, n_v, n_u = geom.n_angles, geom.n_v, geom.n_u
+        rays, scale = index_space_rays(geom, vol_geom)
+        rays = np.stack(rays, axis=1)  # (n, 6, 3)
+        rays = np.concatenate([rays, np.zeros((n, 6, 1))], axis=2)
+        rays = rays.astype(np.float32)
+        plane = (ny + 2) * (nx + 2)
+        if slab is None:
+            # Textures are not bound by the storage binding limit; four
+            # times it keeps memory use moderate on every device.
+            slab = max(1, 4 * self.max_binding // (4 * plane) - 3)
+        slab = max(1, min(slab, nz, self.max_texture - 3))
+        per_proj = n_u * n_v
+        if per_proj * 4 > self.max_binding:
+            raise RuntimeError('A single projection is too large for this '
+                               'GPU')
+        planes = max(nx, ny, nz)
+        batch = max(1, min(n, MAX_UPDATES_PER_DISPATCH //
+                           max(1, per_proj * planes),
+                           self.max_binding // (4 * per_proj),
+                           self.max_groups))
+        out = np.zeros((n, n_v, n_u), dtype=np.float32)
+        slabs = list(range(0, nz, slab))
+        total = len(slabs) * n
+        done = 0
+        for s0 in slabs:
+            s1 = min(nz, s0 + slab)
+            # Slices s0 - 1 .. s1 + 1, zeros beyond the volume, inside a
+            # border of zeros in x and y.
+            size = (nx + 2, ny + 2, s1 - s0 + 3)
+            data = np.zeros(size[::-1], dtype=np.float32)
+            z0, z1 = max(0, s0 - 1), min(nz, s1 + 2)
+            data[z0 - (s0 - 1):z1 - (s0 - 1), 1:-1, 1:-1] = vol[z0:z1]
+            tex = self.device.create_texture(
+                size=size, dimension='3d', format='r32float',
+                usage=wgpu.TextureUsage.TEXTURE_BINDING |
+                wgpu.TextureUsage.COPY_DST)
+            self.device.queue.write_texture(
+                {'texture': tex}, data,
+                {'bytes_per_row': size[0] * 4, 'rows_per_image': size[1]},
+                size)
+            del data
+            view = tex.create_view()
+            own0 = -1 if s0 == 0 else s0
+            own1 = s1 if s1 < nz else nz + 1
+            for k0 in range(0, n, batch):
+                if should_stop():
+                    tex.destroy()
+                    return None
+                k1 = min(n, k0 + batch)
+                params = self._forward_params(n_u, n_v, k1 - k0, vol.shape,
+                                              scale, s0, own0, own1, size)
+                out_buf = self._buffer(
+                    size=(k1 - k0) * per_proj * 4,
+                    usage=wgpu.BufferUsage.COPY_SRC)
+                ray_buf = self._buffer(np.ascontiguousarray(rays[k0:k1]))
+                par_buf = self.device.create_buffer_with_data(
+                    data=params, usage=wgpu.BufferUsage.UNIFORM)
+                bind = self.device.create_bind_group(
+                    layout=self.forward_texture_layout,
+                    entries=[
+                        {'binding': 0, 'resource': view},
+                        {'binding': 1, 'resource': {'buffer': ray_buf}},
+                        {'binding': 2, 'resource': {'buffer': out_buf}},
+                        {'binding': 3, 'resource': {'buffer': par_buf}},
+                    ])
+                enc = self.device.create_command_encoder()
+                cp = enc.begin_compute_pass()
+                cp.set_pipeline(self.forward_texture_pipeline)
+                cp.set_bind_group(0, bind)
+                cp.dispatch_workgroups(-(-n_u // 8), -(-n_v // 8), k1 - k0)
+                cp.end()
+                self.device.queue.submit([enc.finish()])
+                data = self.device.queue.read_buffer(out_buf)
+                out[k0:k1] += np.frombuffer(data, dtype=np.float32).reshape(
+                    k1 - k0, n_v, n_u)
+                for b in (out_buf, ray_buf, par_buf):
+                    b.destroy()
+                done += k1 - k0
+                if progress is not None:
+                    progress(done, total)
+            tex.destroy()
+        return out
+
+    def _forward_buffer(self, volume, geom, vol_geom, progress=None,
+                        should_stop=None, slab=None):
+        """The storage-buffer kernel, for devices whose 3D textures are
+        too small for a slice. The volume streams through in slabs of z
+        slices (plus one slice of overlap for interpolation)."""
         from .forward_cpu import index_space_rays
         wgpu = self.wgpu
         should_stop = should_stop or (lambda: False)
@@ -607,6 +900,7 @@ class WgpuBackprojector:
             buffers.append(buf)
             return buf
 
+        texture = None
         try:
             x_buf = upload(x, wgpu.BufferUsage.COPY_SRC)
             c_buf = upload(C)
@@ -630,27 +924,63 @@ class WgpuBackprojector:
             rays = np.stack(rays, axis=1)
             rays = np.concatenate([rays, np.zeros((n, 6, 1))], axis=2)
 
+            # The forward projection reads the volume from a texture when
+            # it fits, refreshed from x at the start of every iteration.
+            if self._texture_fits(nx, ny, nz):
+                size = (nx + 2, ny + 2, nz + 3)
+                texture = self.device.create_texture(
+                    size=size, dimension='3d', format='r32float',
+                    usage=wgpu.TextureUsage.TEXTURE_BINDING |
+                    wgpu.TextureUsage.STORAGE_BINDING)
+                view = texture.create_view()
+                copy_bind = self.device.create_bind_group(
+                    layout=self.to_texture_layout,
+                    entries=[
+                        {'binding': 0, 'resource': {'buffer': x_buf}},
+                        {'binding': 1, 'resource': view},
+                        {'binding': 2, 'resource': {'buffer': uniform(
+                            [nx, ny, nz, 0], np.uint32)}},
+                    ])
+
             steps = []
             for k0 in range(0, n, batch):
                 k1 = min(n, k0 + batch)
                 nk = k1 - k0
-                fwd = np.zeros(16, dtype=np.uint32)
-                fwd[:6] = [n_u, n_v, nk, nx, ny, nz]
-                # The whole volume is one slab that owns every sample.
-                fwd[6:10] = np.array([0, nz, -1, nz],
-                                     dtype=np.int32).view(np.uint32)
-                fwd[12:15] = np.array(scale, dtype=np.float32).view(
-                    np.uint32)
-                fwd_bind = self.device.create_bind_group(
-                    layout=self.forward_pipeline.get_bind_group_layout(0),
-                    entries=[
-                        {'binding': 0, 'resource': {'buffer': x_buf}},
-                        {'binding': 1,
-                         'resource': {'buffer': upload(rays[k0:k1])}},
-                        {'binding': 2, 'resource': {'buffer': r_buf}},
-                        {'binding': 3,
-                         'resource': {'buffer': uniform(fwd, np.uint32)}},
-                    ])
+                if texture is not None:
+                    # The whole volume is one slab that owns every sample.
+                    fwd = self._forward_params(n_u, n_v, nk, (nz, ny, nx),
+                                               scale, 0, -1, nz + 1, size)
+                    fwd_bind = self.device.create_bind_group(
+                        layout=self.forward_texture_layout,
+                        entries=[
+                            {'binding': 0, 'resource': view},
+                            {'binding': 1,
+                             'resource': {'buffer': upload(rays[k0:k1])}},
+                            {'binding': 2, 'resource': {'buffer': r_buf}},
+                            {'binding': 3,
+                             'resource': {'buffer': uniform(fwd,
+                                                            np.uint8)}},
+                        ])
+                else:
+                    fwd = np.zeros(16, dtype=np.uint32)
+                    fwd[:6] = [n_u, n_v, nk, nx, ny, nz]
+                    # The whole volume is one slab owning every sample.
+                    fwd[6:10] = np.array([0, nz, -1, nz],
+                                         dtype=np.int32).view(np.uint32)
+                    fwd[12:15] = np.array(scale, dtype=np.float32).view(
+                        np.uint32)
+                    fwd_bind = self.device.create_bind_group(
+                        layout=self.forward_pipeline.get_bind_group_layout(
+                            0),
+                        entries=[
+                            {'binding': 0, 'resource': {'buffer': x_buf}},
+                            {'binding': 1,
+                             'resource': {'buffer': upload(rays[k0:k1])}},
+                            {'binding': 2, 'resource': {'buffer': r_buf}},
+                            {'binding': 3,
+                             'resource': {'buffer': uniform(fwd,
+                                                            np.uint32)}},
+                        ])
                 res = self._elementwise(self.residual_pipeline, r_buf,
                                         upload(R[k0:k1]), upload(b[k0:k1]),
                                         nk * per_proj)
@@ -669,10 +999,15 @@ class WgpuBackprojector:
         except Exception:
             for buf in buffers:
                 buf.destroy()
+            if texture is not None:
+                texture.destroy()
             raise
+        if texture is not None:
+            buffers.append(texture)   # destroyed with the buffers
         return dict(buffers=buffers, x=x_buf, c=c_buf, u=u_buf,
                     steps=steps, n_vox=n_vox, n_u=n_u, n_v=n_v,
-                    nx=nx, ny=ny, nz=nz)
+                    nx=nx, ny=ny, nz=nz, texture=texture,
+                    copy=copy_bind if texture is not None else None)
 
     def _sirt_iterate(self, plan, iterations, nonnegative, should_stop,
                       progress, callback, volume_needed, shape):
@@ -705,9 +1040,13 @@ class WgpuBackprojector:
             enc = self.device.create_command_encoder()
             enc.clear_buffer(plan['u'])
             self.device.queue.submit([enc.finish()])
+            if plan['texture'] is not None:
+                run(self.to_texture_pipeline, plan['copy'],
+                    (-(-nx // 8), -(-ny // 8), -(-nz // 4)))
+            forward = self.forward_texture_pipeline \
+                if plan['texture'] is not None else self.forward_pipeline
             for fwd_bind, nk, res, bp_bind in plan['steps']:
-                run(self.forward_pipeline, fwd_bind,
-                    (-(-n_u // 8), -(-n_v // 8), nk))
+                run(forward, fwd_bind, (-(-n_u // 8), -(-n_v // 8), nk))
                 run(self.residual_pipeline, res[0], res[1])
                 run(self.pipeline, bp_bind,
                     (-(-nx // 8), -(-ny // 8), -(-nz // 4)))
