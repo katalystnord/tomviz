@@ -46,8 +46,10 @@ out), projections read from the NVMe:
 | | Total | Filter | Backproject | Waiting for reads | Peak memory |
 |---|---|---|---|---|---|
 | Streamed, first version | 94.2 s | 79.1 s | 14.2 s | 0.8 s | 4.1 GB |
-| Streamed, now | 21.5 s | 7.6 s | 13.0 s | 0.7 s | 5.5 GB |
-| In memory, now | 22.3 s (1.9 read + 20.4) | | | | 7.8 GB |
+| Streamed, filter 6x faster, rows kept | 21.5 s | 7.6 s | 13.0 s | 0.7 s | 5.5 GB |
+| In memory, same filter | 22.3 s (1.9 read + 20.4) | | | | 7.8 GB |
+| Streamed, filter reused weights, filtered one slab ahead | **14.0 s** | 4.7 s (hidden) | 12.7 s | 0.5 s | **3.6 GB** |
+| In memory, same filter | 16.8 s (1.9 read + 14.9) | | | | 7.8 GB |
 
 The first measurement showed the CPU filter, not the disk, as the
 bottleneck. Profiling it gave a 6x faster filter for all FDK (a separable
@@ -64,6 +66,7 @@ in, 34.4 GB out; about 38 GB of RAM was free):
 |---|---|---|---|---|---|---|
 | 4 GiB | 1142 | 1408 s | 377 s | 1030 s | 1.4 s | 6.4 GB |
 | 20 GiB | 8 | 193 s | 44 s | 146 s | 2.5 s | 18.8 GB |
+| 20 GiB, filter reused weights, filtered one slab ahead | 10 | **118 s** | 20 s (hidden) | 114 s | 1.4 s | 15.3 GB |
 
 With a cone beam even one slice near the top or bottom of the volume
 projects onto a tall band of detector rows, and keeping that band's
@@ -75,25 +78,31 @@ backprojection (146 s) is close to what the 1024^3 run predicts for 8x the
 voxels (about 105 s). The budget now defaults to half the memory available
 at the time. The disk was never the limit: 2.5 s of waiting in 193 s.
 
+With the filter running on the CPU one slab ahead of the GPU (reader,
+filter, GPU and writer as four stages), the GPU waits 3.7 s for filtered
+rows in 118 s: the reconstruction now takes about as long as its
+backprojection alone, and streaming is faster than in memory.
+
+## Tried and measured
+
+* **Sharing slabs between the GPU and the CPU** (the kvstream
+  co-processor idea; backprojection is a sum, so it would be exact). On
+  this machine lavapipe, the same WebGPU kernel on the 24 CPU cores,
+  backprojects 37x slower than the RX 9070 (34.6 s against 0.94 s for
+  the same slab); giving it even 1/6 of the slices made the whole six
+  times slower. Not worth it beside a discrete GPU; possibly on machines
+  with only an integrated one. (An earlier estimate of 28 % came from
+  whole FDK runs dominated by the then slow CPU filter.)
+* **A GPU filter** would save at most what the pipeline already hides.
+
 ## Next steps
 
-1. **Split the work across GPU and CPU, exactly.** Backprojection is a
-   sum, so slabs can go to two devices at once and the results are exact
-   by construction (the kvstream co-processor idea). Plain numpy is about
-   50x slower than the GPU here, too slow to matter, but lavapipe (the
-   same WebGPU kernel compiled for the 24 CPU cores) reached 28 % of the
-   RX 9070 on the walnut. With the CPU also filtering, perhaps 15 to 20 %
-   more throughput; to be measured, with an automatic share that stays
-   off when it does not help.
-2. **Filter on the GPU.** The filter is now a third of the time and runs
-   on the CPU; a WGSL FFT or a direct convolution would move it next to
-   the backprojection.
-3. **SIRT and parallel beams.** Parallel-beam slices are independent
+1. **SIRT and parallel beams.** Parallel-beam slices are independent
    (each needs one detector row), so streaming them is simpler still.
    SIRT needs every projection per iteration; streaming it means one pass
    over the projection file per iteration, which at 6.6 GB/s is a few
    seconds for tens of GB.
-4. **Bring it into Tomviz.** Tomviz's pipeline passes whole images
+2. **Bring it into Tomviz.** Tomviz's pipeline passes whole images
    between operators. The least intrusive route:
    * a *Reconstruct to File* option on the cone-beam operators: when the
      projections came from a file (or are saved to the NVMe first), FDK
@@ -103,7 +112,7 @@ at the time. The disk was never the limit: 2.5 s of waiting in 193 s.
      needed;
    * write the volume as HDF5 (chunked) rather than raw, so it opens like
      any other file and carries its spacing.
-5. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
+3. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
    the bottleneck again (12 GB of projections take 43 s just to read).
    Copying a scan to the NVMe first, or recording straight to it, keeps
    streaming free.

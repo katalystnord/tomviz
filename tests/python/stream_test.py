@@ -76,3 +76,26 @@ def test_streamed_on_the_gpu(scan, tmp_path):
     reference = fdk(proj, g, vg, backend='cpu')
     np.testing.assert_allclose(streamed, reference,
                                atol=1e-4 * np.abs(reference).max())
+
+
+def test_streams_into_an_emd_file_tomviz_opens(scan, tmp_path):
+    from tomviz.conebeam.operator_support import set_volume
+    from tomviz.conebeam.stream import create_emd
+    from tomviz_pipeline.dataset import Dataset
+    from tomviz_pipeline.io import load_dataset
+    g, vg, proj = scan
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    src = RawStack.npy(str(tmp_path / 'proj.npy'))
+    out = create_emd(str(tmp_path / 'vol.emd'), vg)
+    fdk_stream(src, g, vg, out, backend='cpu', memory_bytes=400_000)
+    src.close()
+    out.close()
+    opened = load_dataset(tmp_path / 'vol.emd')
+    # Laid out as the FDK operator gives the volume to Tomviz.
+    expected = Dataset({'FDK': np.zeros((1, 1, 1), np.float32)}, 'FDK')
+    set_volume(expected, fdk(proj, g, vg, backend='cpu'), vg)
+    np.testing.assert_allclose(opened.active_scalars,
+                               expected.active_scalars,
+                               atol=1e-5 * np.abs(expected.active_scalars)
+                               .max())
+    np.testing.assert_allclose(opened.spacing, expected.spacing, rtol=1e-6)
