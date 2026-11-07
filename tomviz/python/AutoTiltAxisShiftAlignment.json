@@ -23,6 +23,22 @@
       ]
     },
     {
+      "name": "method",
+      "label": "Method",
+      "description": "Trial Reconstructions: reconstruct a few slices at whole-pixel shifts from -20 to +20 and keep the sharpest (any scan). Opposite Projections: compare projections 180 degrees apart, which for a parallel beam are mirror images about the axis; sub-pixel, any offset, and fast, but needs such pairs (scans over 180 degrees with both ends, or over 360).",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Trial Reconstructions": "reconstruction"
+        },
+        {
+          "Opposite Projections (parallel beam)": "opposite"
+        }
+      ],
+      "visible_if": "transform_source == 'generate'"
+    },
+    {
       "name": "transform_file",
       "label": "Transform File",
       "description": "Transformation file (npz format) to apply",
@@ -38,7 +54,7 @@
       "default": 10,
       "minimum": 0,
       "maximum": 1000000,
-      "visible_if": "transform_source == 'generate'"
+      "visible_if": "transform_source == 'generate' and method == 'reconstruction'"
     },
     {
       "name": "num_slices",
@@ -48,7 +64,7 @@
       "default": 5,
       "minimum": 2,
       "maximum": 1000000,
-      "visible_if": "transform_source == 'generate'"
+      "visible_if": "transform_source == 'generate' and method == 'reconstruction'"
     },
     {
       "name": "seed",
@@ -58,7 +74,7 @@
       "default": 0,
       "minimum": 0,
       "maximum": 1000000000,
-      "visible_if": "transform_source == 'generate'"
+      "visible_if": "transform_source == 'generate' and method == 'reconstruction'"
     },
     {
       "name": "apply_to_all_arrays",
