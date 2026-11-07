@@ -735,6 +735,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("2D Gradient Magnitude");
   QAction* ctfCorrectAction =
     preprocessingMenu->addAction("CTF Correction");
+  QAction* phaseRetrievalAction =
+    preprocessingMenu->addAction("Phase Retrieval (Paganin)");
 
   // === Alignment submenu ===
   QMenu* alignmentMenu = m_ui->menuTomography->addMenu("Alignment");
@@ -824,6 +826,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
   new AddPythonTransformReaction(ctfCorrectAction, "CTF Correction",
                                  readInPythonScript("ctf_correct"),
                                  readInJSONDescription("ctf_correct"));
+  new AddPythonTransformReaction(
+    phaseRetrievalAction, "Phase Retrieval (Paganin)",
+    readInPythonScript("PhaseRetrievalPaganin"),
+    readInJSONDescription("PhaseRetrievalPaganin"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),
