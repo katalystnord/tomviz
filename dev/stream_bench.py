@@ -1,6 +1,7 @@
 """Benchmark FDK streamed from and to files on a fast drive.
 
     python dev/stream_bench.py DIR N_PROJ DET VOX [MEMORY_GB] [--compare]
+        [--parallel] [--sirt ITERATIONS]
 
 Writes N_PROJ projections of DET x DET pixels (float32) into DIR, drops
 them from the page cache so reads come from the drive, reconstructs a VOX^3
@@ -8,7 +9,8 @@ volume into DIR with fdk_stream within MEMORY_GB, and reports where the
 time went and the peak memory. --compare also runs the in-memory fdk() (if
 it fits) to show the cost of streaming. The projection content is a smooth
 synthetic pattern: only the timing matters here; correctness is tested in
-tests/python/stream_test.py.
+tests/python/stream_test.py. --parallel uses a parallel beam over 180
+degrees (FBP), and --sirt N runs N iterations of streamed SIRT instead.
 """
 
 import os
@@ -19,8 +21,9 @@ import time
 import numpy as np
 
 from tomviz.conebeam import fdk
-from tomviz.conebeam.stream import RawStack, fdk_stream, plan_slabs
-from tomviz.projectors import ConeGeometry, VolumeGeometry
+from tomviz.conebeam.stream import (RawStack, fdk_stream, plan_sirt_slabs,
+                                    plan_slabs, sirt_stream)
+from tomviz.projectors import ConeGeometry, ParallelGeometry, VolumeGeometry
 from tomviz.projectors.backend import get_backend
 
 
@@ -56,11 +59,18 @@ def main():
     memory = float(sys.argv[5]) if len(sys.argv) > 5 and \
         not sys.argv[5].startswith('--') else 4.0
     compare = '--compare' in sys.argv
+    parallel = '--parallel' in sys.argv or '--sirt' in sys.argv
+    iterations = int(sys.argv[sys.argv.index('--sirt') + 1]) \
+        if '--sirt' in sys.argv else 0
     os.makedirs(folder, exist_ok=True)
     proj_path = os.path.join(folder, 'proj.raw')
     vol_path = os.path.join(folder, 'vol.raw')
-    g = ConeGeometry.circular(np.arange(n) * 360.0 / n, 300.0, 600.0,
-                              0.1, 0.1, det, det)
+    if parallel:
+        g = ParallelGeometry.circular(np.arange(n) * 180.0 / n, 0.05, 0.05,
+                                      det, det)
+    else:
+        g = ConeGeometry.circular(np.arange(n) * 360.0 / n, 300.0, 600.0,
+                                  0.1, 0.1, det, det)
     vg = VolumeGeometry((vox, vox, vox), 0.05 * det / vox)
     be = get_backend('auto')
     print(f'backend: {be.description}')
@@ -70,17 +80,23 @@ def main():
           f'{gb_out:.1f} GB')
     print(f'writing projections: {make_projections(proj_path, n, det):.1f}'
           ' s')
-    slabs = plan_slabs(g, vg, int(memory * 2 ** 30))
-    print(f'{len(slabs)} slabs within {memory:g} GiB')
+    budget = int(memory * 2 ** 30)
+    plan = plan_sirt_slabs(g, vg, budget, 8) if iterations else \
+        plan_slabs(g, vg, budget)
+    print(f'{len(plan)} slabs within {memory:g} GiB')
     src = RawStack(proj_path, (n, det, det))
     dst = RawStack(vol_path, vg.shape, mode='w')
-    t = fdk_stream(src, g, vg, dst, backend=be,
-                   memory_bytes=int(memory * 2 ** 30))
+    if iterations:
+        t = sirt_stream(src, g, vg, dst, iterations=iterations, backend=be,
+                        memory_bytes=budget)
+    else:
+        t = fdk_stream(src, g, vg, dst, backend=be, memory_bytes=budget)
     src.close()
     dst.close()
-    rows = t.pop('rows')
+    rows = t.pop('rows', None)
     print('streamed: ' + ', '.join(f'{k} {v:.1f} s' for k, v in t.items()) +
-          f'; detector rows read and filtered: {rows} of {det}')
+          (f'; detector rows read and filtered: {rows} of {det}'
+           if rows else ''))
     print(f'peak memory (RSS): {peak_rss_gb():.1f} GB')
     if compare:
         drop_cache(proj_path)
@@ -88,8 +104,12 @@ def main():
         proj = np.fromfile(proj_path, np.float32).reshape(n, det, det)
         read = time.perf_counter() - a
         a = time.perf_counter()
-        fdk(proj, g, vg, backend=be, overwrite=True)
-        print(f'in memory: read {read:.1f} s, fdk '
+        if iterations:
+            from tomviz.projectors.sirt import sirt
+            sirt(proj, g, vg, iterations=iterations, backend=be)
+        else:
+            fdk(proj, g, vg, backend=be, overwrite=True)
+        print(f'in memory: read {read:.1f} s, reconstruction '
               f'{time.perf_counter() - a:.1f} s, peak memory '
               f'{peak_rss_gb():.1f} GB')
     os.remove(proj_path)

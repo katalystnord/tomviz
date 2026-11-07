@@ -157,6 +157,9 @@ def _open_hdf5(path, dataset):
             angles = None if theta is None else \
                 np.asarray(theta[()], float).ravel()[index] * scale
             names = {'data': data.name}
+            det = g.get('instrument/detector', {})
+            pixel = nxtomo._length_mm(nxtomo._first(
+                det, ['real_x_pixel_size', 'x_pixel_size']))
             refs = {'flat': np.flatnonzero(keys == nxtomo.FLAT),
                     'dark': np.flatnonzero(keys == nxtomo.DARK)}
     if index is None:
@@ -176,7 +179,8 @@ def _open_hdf5(path, dataset):
         if len(refs['flat']) else None
     dark = source.frames(refs['dark']).mean(axis=0) \
         if len(refs['dark']) else None
-    return Scan(source, angles, flat=flat, dark=dark, kind='NXtomo')
+    return Scan(source, angles, metadata={'pixel_size_mm': pixel},
+                flat=flat, dark=dark, kind='NXtomo')
 
 
 def line_integrals(scan, mode='auto', i0=0.0, dark_level=0.0,
@@ -219,3 +223,71 @@ def line_integrals(scan, mode='auto', i0=0.0, dark_level=0.0,
     log(f'open-beam levels estimated per projection ({levels.min():g} to '
         f'{levels.max():g})')
     return LineIntegrals(scan.source, levels, dark_level)
+
+
+def _edges_to_zero(rows, edge=4):
+    """Rows minus the straight line through their edge levels, so the
+    FFT's zero padding adds no step (a mean subtraction would leave a box
+    whose correlation pulls the estimate towards no offset)."""
+    rows = np.asarray(rows, dtype=np.float64)
+    n = rows.shape[-1]
+    edge = max(1, min(edge, n // 4))
+    left = rows[..., :edge].mean(axis=-1, keepdims=True)
+    right = rows[..., -edge:].mean(axis=-1, keepdims=True)
+    return rows - (left + (right - left) * np.linspace(0.0, 1.0, n))
+
+
+def axis_offset_from_opposite(source, angles, n_rows=16, max_pairs=12):
+    """Where the rotation axis of a parallel-beam scan projects onto the
+    detector, in pixels from the detector centre along the rows (the
+    offset_u of ParallelGeometry.circular), from projections 180 degrees
+    apart: p(theta + 180, u) is p(theta, u) mirrored about the axis.
+
+    The same method as the opposite-projections option of Tilt Axis Shift
+    Alignment, on n_rows detector rows spread over the frame, read from
+    the source, so the scan is never loaded."""
+    angles = np.asarray(angles, dtype=np.float64).ravel()
+    n_angles, n_v, n_u = source.shape
+    if len(angles) != n_angles:
+        raise RuntimeError('Every projection needs an angle')
+    steps = np.diff(np.sort(angles))
+    step = np.median(steps[steps > 0]) if np.any(steps > 0) else 1.0
+    tolerance = max(0.25 * step, 1e-3)
+    pairs = []
+    for i, a in enumerate(angles):
+        gap = np.abs(np.mod(angles - a, 360.0) - 180.0)
+        j = int(np.argmin(gap))
+        if gap[j] <= tolerance and i < j:
+            pairs.append((i, j))
+    if not pairs:
+        raise RuntimeError(
+            'Finding the rotation axis needs projections 180 degrees apart '
+            '(scans over 180 degrees with both ends, or over 360); give '
+            'the axis offset instead')
+    pick = [pairs[k] for k in np.unique(np.linspace(
+        0, len(pairs) - 1, min(max_pairs, len(pairs))).astype(int))]
+    rows = np.unique(np.linspace(n_v * 0.1, n_v * 0.9 - 1,
+                                 min(n_rows, n_v)).astype(int))
+    # (n_angles, rows, n_u), only the projections of the chosen pairs kept
+    wanted = sorted({k for p in pick for k in p})
+    band = np.concatenate([source.read_rows(r, r + 1)[wanted]
+                           for r in rows], axis=1)
+    where = {k: i for i, k in enumerate(wanted)}
+    up = 16
+    size = 2 * n_u * up
+    offsets = []
+    for i, j in pick:
+        a = _edges_to_zero(band[where[i]])
+        b = _edges_to_zero(band[where[j]][:, ::-1])
+        spectrum = (np.fft.rfft(a, 2 * n_u, axis=1) *
+                    np.conj(np.fft.rfft(b, 2 * n_u, axis=1))).sum(axis=0)
+        cc = np.fft.irfft(spectrum, size)
+        peak = int(np.argmax(cc))
+        left, right = cc[peak - 1], cc[(peak + 1) % size]
+        denom = left - 2 * cc[peak] + right
+        frac = 0.5 * (left - right) / denom if denom != 0 else 0.0
+        lag = (peak + frac) / up
+        if lag > n_u:
+            lag -= 2 * n_u
+        offsets.append(lag / 2.0)
+    return float(np.median(offsets))

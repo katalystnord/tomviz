@@ -787,7 +787,7 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
   QAction* reconConeBeamSIRTAction =
     reconstructionMenu->addAction("Cone-Beam SIRT (X-ray CT)");
   QAction* reconLargeScanAction = reconstructionMenu->addAction(
-    "Reconstruct Large Scan to File (Cone-Beam FDK)");
+    "Reconstruct Large Scan to File");
   new AddPythonSourceReaction(reconLargeScanAction,
                               readInPythonScript("ReconstructLargeScanToFile"),
                               readInJSONDescription("ReconstructLargeScanToFile"));
