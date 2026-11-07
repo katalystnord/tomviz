@@ -16,6 +16,38 @@ transpose up to a smooth weight, which C normalises away.
 import numpy as np
 
 
+def _available_memory():
+    """Bytes of memory available now (Linux), else 8 GiB."""
+    try:
+        with open('/proc/meminfo') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 8 << 30
+
+
+def _slice_projector(geom, vol_geom, be, cpu_matrix, memory_bytes, log):
+    """A sparse.SliceProjector when there is no hardware GPU and the
+    geometry and memory allow one, else None."""
+    from . import sparse
+    if cpu_matrix == 'none':
+        return None
+    if cpu_matrix not in sparse.MATRICES:
+        raise ValueError(f'Unknown cpu_matrix {cpu_matrix!r}; choose one of '
+                         f"{sparse.MATRICES + ('none',)}")
+    if be.name != 'cpu' and not be.software:
+        return None
+    if memory_bytes is None:
+        memory_bytes = _available_memory() // 4
+    why = sparse.unsuitable(geom, vol_geom, cpu_matrix, memory_bytes)
+    if why is not None:
+        log(f'No sparse matrix per slice: {why}')
+        return None
+    return sparse.SliceProjector(geom, vol_geom, cpu_matrix)
+
+
 def _safe_inverse(a, rel=1e-6):
     """1 / a where a is meaningfully positive, 0 elsewhere."""
     out = np.zeros_like(a)
@@ -26,7 +58,8 @@ def _safe_inverse(a, rel=1e-6):
 
 def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
          nonnegative=True, backend='cpu', x0=None, progress=None,
-         should_stop=None, callback=None, volume_needed=None, log=None):
+         should_stop=None, callback=None, volume_needed=None, log=None,
+         cpu_matrix='joseph', cpu_memory_bytes=None):
     """Reconstruct a volume from line-integral projections.
 
     projections: (n_angles, n_v, n_u) array.
@@ -44,6 +77,14 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
     use x at that iteration; when it says False, x may be None. On a GPU
     that saves copying the volume back every iteration.
     log(message) receives human-readable notes.
+    cpu_matrix: without a hardware GPU (the numpy backend or a software
+        adapter), parallel beams perpendicular to the axis are projected
+        with a sparse matrix per slice (tomviz.projectors.sparse), far
+        faster: 'joseph' (the same interpolation as the other
+        projectors) or 'siddon' (the matrix of Tomviz's ART and SIRT
+        operators); 'none' keeps the backend's projectors. Used when the
+        matrix fits in cpu_memory_bytes (default: a quarter of the memory
+        available).
 
     Returns a float32 (n_z, n_y, n_x) volume.
     """
@@ -56,19 +97,25 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
 
     from .backend import get_backend
     be = get_backend(backend) if isinstance(backend, str) else backend
-    log(f'Projectors: {be.description}')
+    slices = _slice_projector(geom, vol_geom, be, cpu_matrix,
+                              cpu_memory_bytes, log)
+    log(f'Projectors: {slices.description if slices else be.description}')
 
     b = np.ascontiguousarray(projections, dtype=np.float32)
     if b.shape != (geom.n_angles, geom.n_v, geom.n_u):
         raise ValueError(f'Projections of shape {b.shape} do not match the '
                          'geometry')
 
-    def fp(x):
-        return be.forward_project(x, geom, vol_geom,
-                                  should_stop=should_stop)
+    if slices is not None:
+        fp, bp = slices.forward, slices.back
+    else:
+        def fp(x):
+            return be.forward_project(x, geom, vol_geom,
+                                      should_stop=should_stop)
 
-    def bp(p):
-        return be.backproject(p, geom, vol_geom, should_stop=should_stop)
+        def bp(p):
+            return be.backproject(p, geom, vol_geom,
+                                  should_stop=should_stop)
 
     # Two extra projections' worth of work, so the progress bar moves.
     steps = iterations + 1
@@ -92,17 +139,19 @@ def sirt(projections, geom, vol_geom=None, iterations=50, relaxation=1.0,
         if x.shape != vol_geom.shape:
             raise ValueError('x0 does not match the volume')
 
-    if be.sirt_loop is not None:
+    # The GPU's resident loop, unless projecting slice by slice.
+    sirt_loop = be.sirt_loop if slices is None else None
+    if sirt_loop is not None:
         def progress_it(it):
             if progress is not None:
                 progress((it + 2) / steps)
 
         # b, R and C stay on the device; only the volume comes back.
-        result = be.sirt_loop(b, R, C, x, geom, vol_geom, iterations,
-                              nonnegative=nonnegative,
-                              should_stop=should_stop,
-                              progress=progress_it, callback=callback,
-                              volume_needed=volume_needed, log=log)
+        result = sirt_loop(b, R, C, x, geom, vol_geom, iterations,
+                           nonnegative=nonnegative,
+                           should_stop=should_stop,
+                           progress=progress_it, callback=callback,
+                           volume_needed=volume_needed, log=log)
         if result is not NotImplemented:
             return result
     for it in range(iterations):

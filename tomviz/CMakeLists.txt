@@ -899,6 +899,7 @@ set(tomviz_python_projectors_modules
   phantom.py
   siddon.py
   sirt.py
+  sparse.py
   webgpu.py
 )
 
