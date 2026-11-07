@@ -9,6 +9,8 @@ from tomviz.utils import pad_array
 class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
     def transform(self, dataset, transform_source: str = 'generate',
+                  method: str = 'reconstruction',
+                  sharpness_measure: str = 'maximum',
                   transform_file: str = '', padding: int = 0,
                   num_slices: int = 5, seed: int = 0,
                   apply_to_all_arrays: bool = True,
@@ -21,6 +23,8 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
         if transform_source == 'generate':
             kwargs = {
                 **shared_kwargs,
+                'method': method,
+                'sharpness_measure': sharpness_measure,
                 'padding': padding,
                 'num_slices': num_slices,
                 'seed': seed,
@@ -36,10 +40,20 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
         return f(**kwargs)
 
-    def transform_generate(self, dataset, padding: int = 0,
+    def transform_generate(self, dataset, method: str = 'reconstruction',
+                           sharpness_measure: str = 'maximum',
+                           padding: int = 0,
                            num_slices: int = 5, seed: int = 0,
                            apply_to_all_arrays: bool = True,
                            transforms_save_file: str = ''):
+        if method == 'opposite':
+            shift = -opposite_projection_offset(dataset.active_scalars,
+                                                dataset.tilt_angles)
+            print(f'shift: {shift:.3f} (from projections 180 degrees '
+                  'apart)')
+            return self.finish(dataset, shift, apply_to_all_arrays,
+                               transforms_save_file)
+
         self.progress.maximum = 1
 
         # Get Tilt angles
@@ -55,6 +69,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
         Nx, Ny, Nz = tiltSeries.shape
 
         shifts = (np.linspace(-20, 20, 41)).astype('int')
+        measure = sharpness if sharpness_measure == 'gradient' else np.amax
 
         # randomly choose slices with top 50% total intensities
         tiltSeriesSum = np.sum(tiltSeries, axis=(1, 2))
@@ -88,14 +103,18 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
                 recon = wbp2(shiftedTiltSeries[s, :, :],
                              tilt_angles, Ny, 'ramp', 'linear')
-                I[i] = I[i] + np.amax(recon)
+                I[i] = I[i] + measure(recon)
 
             step += 1
             self.progress.value = step
 
         shift = shifts[np.argmax(I)]
         print(f'shift: {shift}')
+        return self.finish(dataset, shift, apply_to_all_arrays,
+                           transforms_save_file)
 
+    def finish(self, dataset, shift, apply_to_all_arrays,
+               transforms_save_file):
         if transforms_save_file:
             np.savez(
                 transforms_save_file,
@@ -135,6 +154,87 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
             # Set the result as the new scalars.
             dataset.set_scalars(name, result)
+
+
+def _edges_to_zero(rows, edge=4):
+    """Rows minus the straight line through their edge levels (the air on
+    either side), so they end at zero and the zero padding of the FFT adds
+    no step. (Subtracting the mean instead leaves a box over the detector
+    width whose correlation peaks at lag 0 and pulls the estimate towards
+    no offset.)"""
+    rows = np.asarray(rows, dtype=np.float64)
+    n = rows.shape[1]
+    edge = max(1, min(edge, n // 4))
+    left = rows[:, :edge].mean(axis=1, keepdims=True)
+    right = rows[:, -edge:].mean(axis=1, keepdims=True)
+    ramp = np.linspace(0.0, 1.0, n)[None, :]
+    return rows - (left + (right - left) * ramp)
+
+
+def sharpness(image):
+    """Gradient energy: mean squared gradient. A misplaced axis smears
+    every edge into an arc and lowers it. (The reconstruction's maximum
+    can instead rise when smeared features overlap.)"""
+    gy, gx = np.gradient(np.asarray(image, dtype=np.float64))
+    return float(np.mean(gx ** 2 + gy ** 2))
+
+
+def opposite_projection_offset(tilt_series, angles, max_pairs=12):
+    """Where the rotation axis projects, in pixels along axis 1 from the
+    centre of the detector, for parallel-beam projections that include
+    pairs 180 degrees apart.
+
+    A projection at theta + 180 is the one at theta mirrored about the
+    axis: p(theta + 180, s) = p(theta, 2c - s). Mirroring the second and
+    cross-correlating it with the first (summed over the rows along the
+    axis) peaks at twice the axis offset, found on a 1/16 pixel grid
+    and refined with a parabola. The median over several pairs is
+    returned.
+    """
+    if tilt_series is None or tilt_series.ndim != 3:
+        raise RuntimeError('Expected a tilt series')
+    angles = np.asarray(angles, dtype=np.float64).ravel()
+    if len(angles) != tilt_series.shape[2]:
+        raise RuntimeError('Every projection needs a tilt angle')
+    steps = np.diff(np.sort(angles))
+    step = np.median(steps[steps > 0]) if np.any(steps > 0) else 1.0
+    tolerance = max(0.25 * step, 1e-3)
+    pairs = []
+    for i, a in enumerate(angles):
+        gap = np.abs(np.mod(angles - a, 360.0) - 180.0)
+        j = int(np.argmin(gap))
+        if gap[j] <= tolerance and i < j:
+            pairs.append((i, j))
+    if not pairs:
+        raise RuntimeError(
+            'The opposite-projections method needs projections 180 degrees '
+            'apart (within a quarter of the angular step), as in scans '
+            'over 180 degrees with both ends, or over 360 degrees. Use '
+            'the trial reconstructions method instead.')
+    pick = np.unique(np.linspace(0, len(pairs) - 1,
+                                 min(max_pairs, len(pairs))).astype(int))
+    n = tilt_series.shape[1]
+    offsets = []
+    for k in pick:
+        i, j = pairs[k]
+        a = _edges_to_zero(tilt_series[:, :, i])
+        b = _edges_to_zero(tilt_series[:, ::-1, j])
+        spectrum = (np.fft.rfft(a, 2 * n, axis=1) *
+                    np.conj(np.fft.rfft(b, 2 * n, axis=1))).sum(axis=0)
+        # Zero-padding the spectrum samples the correlation on a grid of
+        # 1/up pixel; a parabola through the peak refines it further.
+        up = 16
+        size = 2 * n * up
+        cc = np.fft.irfft(spectrum, size)
+        peak = int(np.argmax(cc))
+        left, right = cc[peak - 1], cc[(peak + 1) % size]
+        denom = left - 2 * cc[peak] + right
+        frac = 0.5 * (left - right) / denom if denom != 0 else 0.0
+        lag = (peak + frac) / up
+        if lag > n:
+            lag -= 2 * n
+        offsets.append(lag / 2.0)
+    return float(np.median(offsets))
 
 
 def wbp2(sinogram, angles, N=None, filter="ramp", interp="linear"):

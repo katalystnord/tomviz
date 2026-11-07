@@ -745,6 +745,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     preprocessingMenu->addAction("Flat/Dark Field Correction (X-ray)");
   QAction* intensityToLineIntegralsAction =
     preprocessingMenu->addAction("Intensity to Line Integrals (-log)");
+  QAction* phaseRetrievalAction =
+    preprocessingMenu->addAction("Phase Retrieval (Paganin)");
   QAction* removeRingArtifactsAction =
     preprocessingMenu->addAction("Remove Ring Artifacts");
 
@@ -822,7 +824,8 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
                                  readInPythonScript("BinTiltSeriesByTwo"));
   new AddPythonTransformReaction(
     removeBadPixelsAction, "Remove Bad Pixels",
-    readInPythonScript("RemoveBadPixelsTiltSeries"));
+    readInPythonScript("RemoveBadPixelsTiltSeries"),
+    readInJSONDescription("RemoveBadPixelsTiltSeries"));
   new AddPythonTransformReaction(
     gaussianFilterAction, "Gaussian Filter Tilt Series",
     readInPythonScript("GaussianFilterTiltSeries"),
@@ -853,6 +856,10 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
                                  "Remove Ring Artifacts",
                                  readInPythonScript("RemoveRingArtifacts"),
                                  readInJSONDescription("RemoveRingArtifacts"));
+  new AddPythonTransformReaction(
+    phaseRetrievalAction, "Phase Retrieval (Paganin)",
+    readInPythonScript("PhaseRetrievalPaganin"),
+    readInJSONDescription("PhaseRetrievalPaganin"));
   new AddPythonTransformReaction(
     rotateAlignAction, "Tilt Axis Alignment (manual)",
     readInPythonScript("RotationAlign"),
