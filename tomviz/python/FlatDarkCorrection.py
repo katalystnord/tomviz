@@ -37,6 +37,11 @@ def transform(dataset, flat=None, dark=None, line_integrals=True,
         raise RuntimeError('No scalars found!')
     if projections.ndim != 3:
         raise RuntimeError('Expected a stack of projections')
+    if flat is None:
+        # Without a flat field there is nothing to normalise by.
+        raise RuntimeError('Connect a flat field (open-beam image) to the '
+                           "'flat' input. For data that are already "
+                           'normalised, use Intensity to Line Integrals.')
     frame_shape = projections.shape[:2]
     flat_frames = (_frames(flat.active_scalars, frame_shape)
                    if flat is not None else None)

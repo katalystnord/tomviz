@@ -1,7 +1,7 @@
 {
   "name": "FlatDarkCorrection",
   "label": "Flat/Dark Field Correction",
-  "description": "Correct raw X-ray projections with flat-field (open beam) and dark-field (beam off) images: T = (I - dark) / (flat - dark). Each of the flat and dark inputs may be a single image or a stack of images, which are averaged. With 'Convert to line integrals' on, the result is -ln(T), which is what reconstruction expects. Pixels where flat <= dark are treated as dead and come out as no attenuation.",
+  "description": "Correct raw X-ray projections with flat-field (open beam) and dark-field (beam off) images: T = (I - dark) / (flat - dark). Each of the flat and dark inputs may be a single image or a stack of images, which are averaged. The dark field is optional (0 when not connected). With 'Convert to line integrals' on, the result is -ln(T), which is what reconstruction expects. Pixels where flat <= dark are treated as dead and come out as no attenuation.",
   "externalCompatible": false,
   "parameters": [
     {
@@ -13,8 +13,9 @@
     {
       "name": "dark",
       "label": "Dark Field",
-      "description": "Beam-off image(s) with the same detector size as the projections.",
-      "type": "dataset"
+      "description": "Beam-off image(s) with the same detector size as the projections. Optional: leave it unconnected if the detector has no dark offset, and 0 is used.",
+      "type": "dataset",
+      "optional": true
     },
     {
       "name": "line_integrals",

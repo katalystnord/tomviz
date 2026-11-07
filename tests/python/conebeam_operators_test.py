@@ -76,6 +76,24 @@ def test_flat_dark_operator(line_integrals):
     assert np.allclose(ds.tilt_angles, ANGLES)
 
 
+def test_flat_dark_operator_without_dark(line_integrals):
+    # The dark input is optional: unconnected, it counts as 0.
+    rng = np.random.default_rng(5)
+    gain = rng.uniform(900, 1100, (N_V, N_U)).astype(np.float32)
+    ds = make_dataset(to_tomviz(gain * np.exp(-line_integrals)), ANGLES)
+    module = load_operator_module('FlatDarkCorrection')
+    module.transform(ds, flat=make_dataset(gain[:, :, None].copy(order='F')))
+    assert np.allclose(ds.active_scalars, to_tomviz(line_integrals),
+                       atol=1e-3)
+
+
+def test_flat_dark_operator_needs_a_flat(line_integrals):
+    ds = make_dataset(to_tomviz(np.exp(-line_integrals)), ANGLES)
+    module = load_operator_module('FlatDarkCorrection')
+    with pytest.raises(RuntimeError, match='Connect a flat field'):
+        module.transform(ds)
+
+
 @pytest.mark.parametrize('layout', ['single, count in the middle',
                                     'stack, count in the middle',
                                     'single, transposed'])
