@@ -786,6 +786,11 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags flags)
     reconstructionMenu->addAction("Cone-Beam FDK (X-ray CT)");
   QAction* reconConeBeamSIRTAction =
     reconstructionMenu->addAction("Cone-Beam SIRT (X-ray CT)");
+  QAction* reconLargeScanAction = reconstructionMenu->addAction(
+    "Reconstruct Large Scan to File (Cone-Beam FDK)");
+  new AddPythonSourceReaction(reconLargeScanAction,
+                              readInPythonScript("ReconstructLargeScanToFile"),
+                              readInJSONDescription("ReconstructLargeScanToFile"));
 
   // === Simulation submenu ===
   QMenu* simulationMenu =

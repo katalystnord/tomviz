@@ -83,6 +83,37 @@ filter, GPU and writer as four stages), the GPU waits 3.7 s for filtered
 rows in 118 s: the reconstruction now takes about as long as its
 backprojection alone, and streaming is faster than in memory.
 
+## Using it
+
+From Tomviz: *Tomography > Reconstruction > Reconstruct Large Scan to
+File (Cone-Beam FDK)*. It is a data source, not an operator on loaded
+data: choose the scan on disk and an output .emd file; Tomviz shows the
+volume subsampled to about 256^3 and the file opens at full resolution.
+
+From a shell:
+
+    python -m tomviz.conebeam.reconstruct_file SCAN OUTPUT.emd [options]
+
+Scans it opens without loading (tomviz/conebeam/scan.py, sources.py):
+
+* scanner projects with their geometry: Nikon .xtekct, Waygate .pca,
+  Bruker SkyScan .log (through Tomviz's readers for them, when present);
+* a folder of TIFF files or a multi-page TIFF. Uncompressed pages, which
+  scanners write, are read a row band at a time with positioned reads
+  from eight threads; compressed pages are decoded whole per band;
+* HDF5: NXtomo (projections picked out from among flats and darks by
+  image_key) and Data Exchange, both with their flat and dark fields, or
+  any 3D dataset by name;
+* .npy and raw frames.
+
+Intensities become line integrals as each band is read: from the scan's
+flat and dark fields, or an open-beam level (given, stored by the
+scanner, or estimated per projection from the brightest pixels of 32
+sampled rows).
+
+720 uint16 TIFF files of 2048^2 (6 GB) on the NVMe into a 1024^3 EMD
+file, through the command line: 30 s, of which reading 3.1 s.
+
 ## Tried and measured
 
 * **Sharing slabs between the GPU and the CPU** (the kvstream
@@ -102,17 +133,7 @@ backprojection alone, and streaming is faster than in memory.
    SIRT needs every projection per iteration; streaming it means one pass
    over the projection file per iteration, which at 6.6 GB/s is a few
    seconds for tens of GB.
-2. **Bring it into Tomviz.** Tomviz's pipeline passes whole images
-   between operators. The least intrusive route:
-   * a *Reconstruct to File* option on the cone-beam operators: when the
-     projections came from a file (or are saved to the NVMe first), FDK
-     writes the volume to a file there instead of returning it;
-   * open the result with Tomviz's existing subsampled loading (it can
-     already read strided sub-volumes of HDF5), and full resolution where
-     needed;
-   * write the volume as HDF5 (chunked) rather than raw, so it opens like
-     any other file and carries its spacing.
-3. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
+2. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
    the bottleneck again (12 GB of projections take 43 s just to read).
    Copying a scan to the NVMe first, or recording straight to it, keeps
    streaming free.
