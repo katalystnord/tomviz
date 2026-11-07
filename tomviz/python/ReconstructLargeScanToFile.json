@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "name": "ReconstructLargeScanToFile",
-  "label": "Reconstruct Large Scan to File (Cone-Beam FDK)",
-  "description": "Cone-beam FDK reconstruction of a scan on disk straight into a file, for scans and volumes larger than memory. Projections are read a band of detector rows at a time and the volume is written a slab of slices at a time, with reading, filtering, GPU backprojection and writing running at once; memory use follows the Working Memory setting, not the size of the data. The result is the same as Cone-Beam FDK in memory.\n\nUse it when the scan does not fit in memory, or the volume would not: 2048^3 voxels are 34 GB. For scans that need corrections Tomviz only does in memory (ring removal, alignment), correct them first and save the projections.",
+  "label": "Reconstruct Large Scan to File",
+  "description": "Reconstruct a scan on disk straight into a file, for scans and volumes larger than memory: FDK for cone beams (lab and industrial scanners), filtered backprojection (FBP) or SIRT for parallel beams (synchrotrons). Projections are read a band of detector rows at a time and the volume is written a slab of slices at a time, with reading, filtering, GPU work and writing running at once; memory use follows the Working Memory setting, not the size of the data. FDK and FBP give the same result as in memory; SIRT of parallel beams agrees with SIRT of the whole volume to about 1e-4 of the peak.\n\nUse it when the scan does not fit in memory, or the volume would not: 2048^3 voxels are 34 GB. For scans that need corrections Tomviz only does in memory (ring removal, alignment), correct them first and save the projections.",
   "outputs": [
     {
       "name": "volume",
@@ -33,6 +33,48 @@
       "filter": "EMD files (*.emd)",
       "default": "",
       "description": "The reconstructed volume is written here as it is computed (EMD, the HDF5 layout Tomviz opens). Tomviz then shows a subsampled view of it; open the file for full resolution."
+    },
+    {
+      "name": "beam",
+      "label": "Beam",
+      "type": "enumeration",
+      "default": 0,
+      "description": "Auto treats NXtomo and Data Exchange files (synchrotron formats) as parallel beams and everything else as cone beams.",
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "Cone Beam (Lab CT)": "cone"
+        },
+        {
+          "Parallel Beam (Synchrotron)": "parallel"
+        }
+      ]
+    },
+    {
+      "name": "method",
+      "label": "Method",
+      "type": "enumeration",
+      "default": 0,
+      "description": "FBP is FDK for cone beams. SIRT is iterative and works for parallel beams only here, slab by slab.",
+      "options": [
+        {
+          "Filtered Backprojection (FDK)": "fbp"
+        },
+        {
+          "SIRT (Parallel Beams)": "sirt"
+        }
+      ]
+    },
+    {
+      "name": "iterations",
+      "label": "SIRT Iterations",
+      "type": "int",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 10000,
+      "visible_if": "method == 'sirt'"
     },
     {
       "name": "intensity",
@@ -91,7 +133,8 @@
         {
           "Vectors From File": "file"
         }
-      ]
+      ],
+      "visible_if": "beam != 'parallel'"
     },
     {
       "name": "sod",
@@ -102,7 +145,7 @@
       "minimum": 1e-06,
       "maximum": 1000000000.0,
       "precision": 4,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "geometry_source == 'circular' and beam != 'parallel' or geometry_source == 'auto' and beam != 'parallel'"
     },
     {
       "name": "sdd",
@@ -113,18 +156,18 @@
       "minimum": 1e-06,
       "maximum": 1000000000.0,
       "precision": 4,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "geometry_source == 'circular' and beam != 'parallel' or geometry_source == 'auto' and beam != 'parallel'"
     },
     {
       "name": "pixel_size",
-      "label": "Detector Pixel Size",
-      "description": "Detector pixel pitch (as binned), in the same unit as the distances.",
+      "label": "Detector Pixel Size (0 = from the scan file)",
+      "description": "Detector pixel pitch (as binned), in mm. 0 takes it from the scan file; parallel-beam scans without one are reconstructed in pixel units.",
       "type": "double",
-      "default": 0.1,
-      "minimum": 1e-09,
+      "default": 0.0,
+      "minimum": 0.0,
       "maximum": 1000000.0,
       "precision": 6,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "beam == 'parallel' or geometry_source == 'circular' or geometry_source == 'auto'"
     },
     {
       "name": "offset_u",
@@ -133,7 +176,7 @@
       "type": "double",
       "default": 0.0,
       "precision": 3,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "beam == 'parallel' or geometry_source == 'circular' or geometry_source == 'auto'"
     },
     {
       "name": "offset_v",
@@ -142,7 +185,15 @@
       "type": "double",
       "default": 0.0,
       "precision": 3,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "beam == 'parallel' or geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "find_axis",
+      "label": "Find the Rotation Axis (Parallel Beams)",
+      "type": "bool",
+      "default": true,
+      "description": "Find where the rotation axis projects from projections 180 degrees apart (the same method as Tilt Axis Shift Alignment's opposite projections), read from a few detector rows. Needs a scan over 180 degrees including both ends, or over 360. Off: use the Horizontal Detector Offset.",
+      "visible_if": "beam == 'parallel' or beam == 'auto'"
     },
     {
       "name": "clockwise",
@@ -150,7 +201,7 @@
       "description": "Turn this on if the reconstruction comes out mirrored.",
       "type": "bool",
       "default": false,
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "beam == 'parallel' or geometry_source == 'circular' or geometry_source == 'auto'"
     },
     {
       "name": "geometry_file",
@@ -158,7 +209,7 @@
       "description": "Text file with one row of 12 numbers per projection: source position, detector centre, detector u step (across the rotation axis) and v step (along it), as in ASTRA's cone_vec geometry.",
       "type": "file",
       "filter": "Geometry files (*.geom *.txt *.csv *.npy)",
-      "visible_if": "geometry_source == 'file'",
+      "visible_if": "geometry_source == 'file' and beam != 'parallel'",
       "default": ""
     },
     {
@@ -170,7 +221,7 @@
       "maximum": 3600.0,
       "precision": 2,
       "description": "For files that store no projection angles: the projections are taken as evenly spaced over this arc, the last one a step short of it.",
-      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+      "visible_if": "beam == 'parallel' or geometry_source == 'circular' or geometry_source == 'auto'"
     },
     {
       "name": "filter_name",
@@ -193,7 +244,8 @@
         {
           "Hann": "hann"
         }
-      ]
+      ],
+      "visible_if": "method == 'fbp'"
     },
     {
       "name": "short_scan",
@@ -211,7 +263,8 @@
         {
           "Off": "off"
         }
-      ]
+      ],
+      "visible_if": "method == 'fbp'"
     },
     {
       "name": "volume_size_xy",

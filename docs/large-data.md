@@ -86,13 +86,17 @@ backprojection alone, and streaming is faster than in memory.
 ## Using it
 
 From Tomviz: *Tomography > Reconstruction > Reconstruct Large Scan to
-File (Cone-Beam FDK)*. It is a data source, not an operator on loaded
+File*. It is a data source, not an operator on loaded
 data: choose the scan on disk and an output .emd file; Tomviz shows the
 volume subsampled to about 256^3 and the file opens at full resolution.
 
 From a shell:
 
     python -m tomviz.conebeam.reconstruct_file SCAN OUTPUT.emd [options]
+
+FDK for cone beams; for parallel beams (the default for NXtomo and Data
+Exchange files, or `--beam parallel`) FBP or `--method sirt`, with
+`--find-axis` to locate the rotation axis.
 
 Scans it opens without loading (tomviz/conebeam/scan.py, sources.py):
 
@@ -114,6 +118,39 @@ sampled rows).
 720 uint16 TIFF files of 2048^2 (6 GB) on the NVMe into a 1024^3 EMD
 file, through the command line: 30 s, of which reading 3.1 s.
 
+## Parallel beams (synchrotrons)
+
+The same code reconstructs parallel-beam scans: with no fan, FDK's filter
+is FBP's (no cosine weight, the detector pitch as the sample spacing,
+Parker weights with a zero fan angle), and a slab needs only its own
+detector rows.
+
+A synchrotron-sized scan, 1800 projections of 2048^2 over 180 degrees
+(30.2 GB, float32 on the NVMe), into 2048^3 voxels (34.4 GB) within
+20 GiB: 176 s in total (backprojection 168 s, the GPU waiting 6.9 s for
+filtered rows, reading 4.2 s), peak memory 16.3 GB.
+
+**SIRT** streams for parallel beams whose rays are perpendicular to the
+axis: each ray stays in its slice, so slabs are separate problems, solved
+one after another with all iterations on the GPU. Interpolation between
+detector rows and slices couples neighbours slightly; each slab is solved
+with 8 extra slices on each side, which are dropped. Measured against
+SIRT of the whole volume (largest difference, relative to the peak):
+
+| Halo slices | 0 | 1 | 2 | 4 | 8 | 12 |
+|---|---|---|---|---|---|---|
+| 10 iterations | 22 | 1.0 | 0.19 | 5e-3 | 1.3e-5 | |
+| 50 iterations | | | | | 2.9e-5 | 4.4e-7 |
+| 200 iterations | | | | | 4.0e-5 | 7.1e-7 |
+
+With slices on the detector row grid (voxel size equal to the row pitch,
+the default) the difference is exactly zero.
+
+**Rotation axis.** Synchrotron files rarely say where the axis projects;
+*Find the Rotation Axis* takes it from projections 180 degrees apart (the
+method of Tilt Axis Shift Alignment's opposite projections), on 16
+detector rows read from the file: within 0.03 pixels on the phantom.
+
 ## Tried and measured
 
 * **Sharing slabs between the GPU and the CPU** (the kvstream
@@ -128,12 +165,16 @@ file, through the command line: 30 s, of which reading 3.1 s.
 
 ## Next steps
 
-1. **SIRT and parallel beams.** Parallel-beam slices are independent
-   (each needs one detector row), so streaming them is simpler still.
-   SIRT needs every projection per iteration; streaming it means one pass
-   over the projection file per iteration, which at 6.6 GB/s is a few
-   seconds for tens of GB.
-2. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
+1. **Cone-beam SIRT.** Every cone-beam ray crosses many slices, so
+   slabs are not independent: each iteration needs the forward projection
+   of the whole volume, summed slab by slab, before any slab can be
+   updated. Streamed, that is two passes over the volume file and one
+   over the projections per iteration; at 2048^3 the GPU work alone
+   would be hours for 50 iterations.
+3. **Faster SIRT.** Its ray-driven forward projector costs about three
+   times a backprojection; SIRT of 512^3 from 900 projections takes 9 s
+   per iteration on the RX 9070, streamed or not.
+4. **Where the data lives.** Data on the HDD (0.28 GB/s) would make reads
    the bottleneck again (12 GB of projections take 43 s just to read).
    Copying a scan to the NVMe first, or recording straight to it, keeps
    streaming free.

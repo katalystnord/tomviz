@@ -4,14 +4,17 @@ import tomviz.nodes
 
 
 class ReconstructLargeScanToFile(tomviz.nodes.SourceNode):
-    """Cone-beam FDK of a scan on disk into an EMD file, a slab at a time,
-    for scans and volumes larger than memory. Shows a subsampled view of
-    the result; File > Open the .emd for full resolution."""
+    """FDK, FBP or (parallel beams) SIRT of a scan on disk into an EMD
+    file, a slab at a time, for scans and volumes larger than memory.
+    Shows a subsampled view of the result; File > Open the .emd for full
+    resolution."""
 
     def produce(self, scan_file='', whole_folder=False, output_file='',
+                beam='auto', method='fbp', iterations=50,
                 intensity='auto', i0=0.0, dark_level=0.0,
                 geometry_source='auto', sod=100.0, sdd=200.0,
-                pixel_size=0.1, offset_u=0.0, offset_v=0.0, clockwise=False,
+                pixel_size=0.0, offset_u=0.0, offset_v=0.0,
+                find_axis=True, clockwise=False,
                 geometry_file='', arc=360.0, filter_name='ram-lak',
                 short_scan='auto', volume_size_xy=0, volume_size_axial=0,
                 voxel_size=0.0, backend='auto', memory_gb=0.0,
@@ -38,9 +41,11 @@ class ReconstructLargeScanToFile(tomviz.nodes.SourceNode):
             self.progress.value = int(round(100 * fraction))
 
         result = reconstruct_to_file(
-            path, output_file, geometry_source=geometry_source, sod=sod,
-            sdd=sdd, pixel_size=pixel_size, offset_u=offset_u,
-            offset_v=offset_v, clockwise=clockwise,
+            path, output_file, beam=beam, method=method,
+            iterations=iterations, geometry_source=geometry_source,
+            sod=sod, sdd=sdd, pixel_size=pixel_size, offset_u=offset_u,
+            offset_v=offset_v, find_axis=find_axis and beam != 'cone',
+            clockwise=clockwise,
             geometry_file=geometry_file or None, arc=arc,
             intensity=intensity, i0=i0, dark_level=dark_level,
             filter_name=filter_name, short_scan=short_scan,
@@ -55,7 +60,7 @@ class ReconstructLargeScanToFile(tomviz.nodes.SourceNode):
         data, spacing, stride = read_preview(output_file,
                                              max(preview_voxels, 16) ** 3)
         volume = self.create_dataset()
-        volume.set_scalars('FDK', data)
+        volume.set_scalars('SIRT' if method == 'sirt' else 'FBP', data)
         volume.spacing = spacing
         volume.metadata = {'reconstruction_file': output_file,
                            'preview_stride': stride}

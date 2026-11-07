@@ -94,7 +94,7 @@ def test_data_exchange_with_flats_and_darks(scan, tmp_path):
     s = open_scan(path)
     assert s.kind == 'Data Exchange' and s.flat is not None
     out = tmp_path / 'vol.emd'
-    assert main([str(path), str(out)] + GEOMETRY) == 0
+    assert main([str(path), str(out), '--beam', 'cone'] + GEOMETRY) == 0
     expected = -np.log(((raw - dark) / (I0 * gain)).astype(np.float32))
     close(emd_volume(out), reference(g, expected))
 
@@ -124,7 +124,7 @@ def test_nxtomo_projections_among_flats_and_darks(scan, tmp_path):
     assert s.kind == 'NXtomo' and s.shape == counts.shape
     np.testing.assert_allclose(s.angles, np.arange(n) * 3.0)
     out = tmp_path / 'vol.emd'
-    assert main([str(path), str(out)] + GEOMETRY) == 0
+    assert main([str(path), str(out), '--beam', 'cone'] + GEOMETRY) == 0
     close(emd_volume(out), reference(g, seen))
 
 
@@ -214,3 +214,54 @@ def test_tomviz_source_node_writes_the_file_and_shows_a_preview(scan,
     assert s > 1 and max(shown.active_scalars.shape) <= 16 * 1.5
     np.testing.assert_allclose(shown.active_scalars,
                                full.transpose(0, 2, 1)[::s, ::s, ::s])
+
+
+@pytest.mark.parametrize('method', ['fbp', 'sirt'])
+def test_parallel_beam_data_exchange_with_the_axis_found(tmp_path, method):
+    """A synchrotron-like scan: parallel beam over 180 degrees (both ends),
+    the rotation axis off centre, flats and darks; reconstructed with the
+    axis found from opposite projections."""
+    import h5py
+    from tomviz.projectors import ParallelGeometry, VolumeGeometry
+    from tomviz.projectors.backend import get_backend
+    from tomviz.projectors.sirt import sirt
+    phantom = EllipsoidPhantom.shepp_logan(radius=5.0)
+    angles = np.arange(0, 180.1, 2.0)
+    offset = 2.6
+    g = ParallelGeometry.circular(angles, 0.25, 0.25, 64, 40,
+                                  offset_u=offset)
+    proj = phantom.project(g)
+    gain = np.random.default_rng(2).uniform(0.9, 1.1, (40, 64))
+    raw = (I0 * gain * np.exp(-proj) + 100).astype(np.float32)
+    path = tmp_path / 'scan.h5'
+    with h5py.File(path, 'w') as f:
+        f['exchange/data'] = raw
+        f['exchange/data_white'] = (I0 * gain + 100)[None].astype(
+            np.float32)
+        f['exchange/data_dark'] = np.full((1, 40, 64), 100, np.float32)
+        f['exchange/theta'] = angles
+    out = tmp_path / 'vol.emd'
+    printed = []
+    import builtins
+    real_print = builtins.print
+    builtins.print = lambda *a, **k: printed.append(' '.join(map(str, a)))
+    try:
+        assert main([str(path), str(out), '--find-axis', '--pixel-size',
+                     '0.25', '--method', method, '--iterations', '20',
+                     '--memory-gb', '0.0002']) == 0
+    finally:
+        builtins.print = real_print
+    assert any('parallel beam' in line for line in printed)
+    found = [line for line in printed if 'rotation axis' in line][0]
+    assert abs(float(found.split()[2]) - offset) < 0.1, found
+    vol = emd_volume(out)
+    seen = -np.log(((raw - 100) / (I0 * gain)).astype(np.float32))
+    vg = VolumeGeometry(vol.shape, 0.25)
+    if method == 'fbp':
+        expected = fdk(seen, g, vg)
+    else:
+        expected = sirt(seen, g, vg, iterations=20,
+                        backend=get_backend('auto'))
+    # The axis is found to a few hundredths of a pixel, not exactly.
+    rel = np.sqrt(np.mean((vol - expected) ** 2)) / np.abs(expected).max()
+    assert rel < 0.01, rel
