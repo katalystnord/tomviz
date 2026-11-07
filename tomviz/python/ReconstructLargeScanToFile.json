@@ -1,0 +1,280 @@
+{
+  "schemaVersion": 2,
+  "name": "ReconstructLargeScanToFile",
+  "label": "Reconstruct Large Scan to File (Cone-Beam FDK)",
+  "description": "Cone-beam FDK reconstruction of a scan on disk straight into a file, for scans and volumes larger than memory. Projections are read a band of detector rows at a time and the volume is written a slab of slices at a time, with reading, filtering, GPU backprojection and writing running at once; memory use follows the Working Memory setting, not the size of the data. The result is the same as Cone-Beam FDK in memory.\n\nUse it when the scan does not fit in memory, or the volume would not: 2048^3 voxels are 34 GB. For scans that need corrections Tomviz only does in memory (ring removal, alignment), correct them first and save the projections.",
+  "outputs": [
+    {
+      "name": "volume",
+      "type": "ImageData",
+      "persistent": true
+    }
+  ],
+  "parameters": [
+    {
+      "name": "scan_file",
+      "label": "Scan",
+      "type": "file",
+      "filter": "Scans (*.xtekct *.pca *.log *.tif *.tiff *.h5 *.hdf5 *.nxs *.npy);;All files (*)",
+      "default": "",
+      "description": "A scanner project (Nikon .xtekct, Waygate .pca, Bruker SkyScan .log), a multi-page TIFF or one TIFF of a folder of projections, an HDF5 file (NXtomo or Data Exchange, with their flat and dark fields), or a .npy stack. Nothing is loaded into memory: detector rows are read as they are needed, so keep the scan on a fast drive (an NVMe drive is far faster than a hard disk here)."
+    },
+    {
+      "name": "whole_folder",
+      "label": "Every TIFF File in the Scan's Folder",
+      "type": "bool",
+      "default": false,
+      "description": "For projections stored one TIFF file each: reconstruct every TIFF file in the chosen file's folder, in name order."
+    },
+    {
+      "name": "output_file",
+      "label": "Write the Volume To",
+      "type": "save_file",
+      "filter": "EMD files (*.emd)",
+      "default": "",
+      "description": "The reconstructed volume is written here as it is computed (EMD, the HDF5 layout Tomviz opens). Tomviz then shows a subsampled view of it; open the file for full resolution."
+    },
+    {
+      "name": "intensity",
+      "label": "Projections Are",
+      "type": "enumeration",
+      "default": 0,
+      "description": "How intensities become line integrals, band by band as they are read. Auto uses the scan's flat and dark fields when the file has them, the scanner's open-beam level when it stores one, leaves floating-point data as it is, and otherwise estimates an open-beam level per projection from its brightest pixels.",
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "Line Integrals Already": "none"
+        },
+        {
+          "Intensities: Use the Flat and Dark Fields": "flat"
+        },
+        {
+          "Intensities: Use an Open-Beam Level": "open-beam"
+        }
+      ]
+    },
+    {
+      "name": "i0",
+      "label": "Open-Beam Level (0 = from the file or estimated)",
+      "type": "double",
+      "default": 0.0,
+      "minimum": 0.0,
+      "precision": 3,
+      "visible_if": "intensity == 'open-beam' or intensity == 'auto'"
+    },
+    {
+      "name": "dark_level",
+      "label": "Dark Level",
+      "type": "double",
+      "default": 0.0,
+      "precision": 3,
+      "visible_if": "intensity == 'open-beam' or intensity == 'auto'"
+    },
+    {
+      "name": "geometry_source",
+      "label": "Geometry",
+      "type": "enumeration",
+      "default": 0,
+      "description": "Scanner projects (Nikon .xtekct, Waygate .pca, Bruker SkyScan .log) carry their geometry; plain image stacks and HDF5 files do not, so the circular orbit below is used for them.",
+      "options": [
+        {
+          "From the Scan File, Else Circular Orbit": "auto"
+        },
+        {
+          "From the Scan File": "metadata"
+        },
+        {
+          "Circular Orbit": "circular"
+        },
+        {
+          "Vectors From File": "file"
+        }
+      ]
+    },
+    {
+      "name": "sod",
+      "label": "Source to Rotation Axis Distance",
+      "description": "Distance from the X-ray source to the rotation axis (SOD), in mm or any length unit used consistently.",
+      "type": "double",
+      "default": 100.0,
+      "minimum": 1e-06,
+      "maximum": 1000000000.0,
+      "precision": 4,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "sdd",
+      "label": "Source to Detector Distance",
+      "description": "Distance from the X-ray source to the detector (SDD).",
+      "type": "double",
+      "default": 200.0,
+      "minimum": 1e-06,
+      "maximum": 1000000000.0,
+      "precision": 4,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "pixel_size",
+      "label": "Detector Pixel Size",
+      "description": "Detector pixel pitch (as binned), in the same unit as the distances.",
+      "type": "double",
+      "default": 0.1,
+      "minimum": 1e-09,
+      "maximum": 1000000.0,
+      "precision": 6,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "offset_u",
+      "label": "Horizontal Detector Offset (pixels)",
+      "description": "Where the central ray, through the rotation axis and perpendicular to the detector, hits the detector, in pixels from the detector centre across the rotation axis (along y). Use it to correct an off-centre rotation axis.",
+      "type": "double",
+      "default": 0.0,
+      "precision": 3,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "offset_v",
+      "label": "Vertical Detector Offset (pixels)",
+      "description": "Where the central ray hits the detector, in pixels from the detector centre along the rotation axis (along x).",
+      "type": "double",
+      "default": 0.0,
+      "precision": 3,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "clockwise",
+      "label": "Reverse Rotation Direction",
+      "description": "Turn this on if the reconstruction comes out mirrored.",
+      "type": "bool",
+      "default": false,
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "geometry_file",
+      "label": "Geometry Vectors File",
+      "description": "Text file with one row of 12 numbers per projection: source position, detector centre, detector u step (across the rotation axis) and v step (along it), as in ASTRA's cone_vec geometry.",
+      "type": "file",
+      "filter": "Geometry files (*.geom *.txt *.csv *.npy)",
+      "visible_if": "geometry_source == 'file'",
+      "default": ""
+    },
+    {
+      "name": "arc",
+      "label": "Scan Arc (degrees)",
+      "type": "double",
+      "default": 360.0,
+      "minimum": 1.0,
+      "maximum": 3600.0,
+      "precision": 2,
+      "description": "For files that store no projection angles: the projections are taken as evenly spaced over this arc, the last one a step short of it.",
+      "visible_if": "geometry_source == 'circular' or geometry_source == 'auto'"
+    },
+    {
+      "name": "filter_name",
+      "label": "Filter",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Ram-Lak (ramp)": "ram-lak"
+        },
+        {
+          "Shepp-Logan": "shepp-logan"
+        },
+        {
+          "Cosine": "cosine"
+        },
+        {
+          "Hamming": "hamming"
+        },
+        {
+          "Hann": "hann"
+        }
+      ]
+    },
+    {
+      "name": "short_scan",
+      "label": "Short-Scan Weights",
+      "description": "Parker weights for scans shorter than 360 degrees. Auto uses them when the scan is shorter than a full circle.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "On": "on"
+        },
+        {
+          "Off": "off"
+        }
+      ]
+    },
+    {
+      "name": "volume_size_xy",
+      "label": "Volume Size Across the Axis (voxels, 0 = automatic)",
+      "description": "Voxels in y and z. 0 covers the field of view.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 16384
+    },
+    {
+      "name": "volume_size_axial",
+      "label": "Volume Size Along the Axis (voxels, 0 = automatic)",
+      "description": "Voxels in x. 0 covers the field of view.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 16384
+    },
+    {
+      "name": "voxel_size",
+      "label": "Voxel Size (0 = automatic)",
+      "description": "0 uses the detector pixel size divided by the magnification.",
+      "type": "double",
+      "default": 0.0,
+      "minimum": 0.0,
+      "precision": 6
+    },
+    {
+      "name": "backend",
+      "label": "Compute On",
+      "description": "Auto uses a GPU through WebGPU (any vendor) when available and falls back to the CPU.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Auto": "auto"
+        },
+        {
+          "CPU": "cpu"
+        },
+        {
+          "GPU": "gpu"
+        }
+      ]
+    },
+    {
+      "name": "memory_gb",
+      "label": "Working Memory (GB, 0 = half of what is free)",
+      "type": "double",
+      "default": 0.0,
+      "minimum": 0.0,
+      "precision": 1,
+      "description": "Memory for detector rows and volume slabs. More memory means fewer, larger slabs and less overhead; the volume itself never has to fit."
+    },
+    {
+      "name": "preview_voxels",
+      "label": "Preview Size (voxels per axis, at most)",
+      "type": "int",
+      "default": 256,
+      "minimum": 16,
+      "maximum": 4096,
+      "description": "The view Tomviz shows is the volume subsampled to about this many voxels along each axis."
+    }
+  ]
+}

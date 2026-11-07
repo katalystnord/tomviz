@@ -39,9 +39,11 @@ class RawStack:
         self.shape = tuple(int(n) for n in shape)
         self.dtype = np.dtype(dtype)
         self.offset = int(offset)
-        flags = os.O_RDONLY if mode == 'r' else os.O_RDWR | os.O_CREAT
+        flags = {'r': os.O_RDONLY, 'r+': os.O_RDWR,
+                 'w': os.O_RDWR | os.O_CREAT}[mode]
         self.fd = os.open(path, flags, 0o644)
-        if mode != 'r':
+        self.transpose = None
+        if mode == 'w':
             size = self.offset + int(np.prod(self.shape)) * \
                 self.dtype.itemsize
             os.ftruncate(self.fd, size)
@@ -75,6 +77,8 @@ class RawStack:
 
     def write_slab(self, z0, data):
         """data (nz, ny, nx) at slices z0.. of a (n_z, n_y, n_x) file."""
+        if self.transpose is not None:
+            data = np.transpose(data, self.transpose)
         data = np.ascontiguousarray(data, dtype=self.dtype)
         start = self.offset + z0 * int(np.prod(self.shape[1:])) * \
             self.dtype.itemsize
@@ -82,6 +86,46 @@ class RawStack:
         done = 0
         while done < len(view):
             done += os.pwrite(self.fd, view[done:], start + done)
+
+
+def create_emd(path, vol_geom, units='mm', name='FDK'):
+    """An EMD file (the HDF5 layout Tomviz opens) for a vol_geom volume,
+    with its data set allocated contiguously, returned as a RawStack
+    that writes slabs straight into it with positioned I/O.
+
+    Tomviz stores a volume with x along the rotation axis (our z), then
+    our x and y; on disk that is (n_z, n_x, n_y) in C order, so a slab of
+    slices is one block of the file."""
+    import h5py
+    nz, ny, nx = vol_geom.shape
+    dz, dy, dx = vol_geom.voxel_size
+    with h5py.File(path, 'w') as f:
+        f.attrs.create('version_major', 0, dtype='uint32')
+        f.attrs.create('version_minor', 2, dtype='uint32')
+        group = f.create_group('data').create_group('tomography')
+        group.attrs.create('emd_group_type', 1, dtype='uint32')
+        space = h5py.h5s.create_simple((nz, nx, ny))
+        dcpl = h5py.h5p.create(h5py.h5p.DATASET_CREATE)
+        dcpl.set_layout(h5py.h5d.CONTIGUOUS)
+        dcpl.set_alloc_time(h5py.h5d.ALLOC_TIME_EARLY)
+        dcpl.set_fill_time(h5py.h5d.FILL_TIME_NEVER)
+        h5py.h5d.create(group.id, b'data', h5py.h5t.IEEE_F32LE, space,
+                        dcpl=dcpl)
+        data = group['data']
+        data.attrs['name'] = name
+        offset = data.id.get_offset()
+        for i, (axis, n, step) in enumerate((('x', nz, dz), ('y', nx, dx),
+                                              ('z', ny, dy))):
+            d = group.create_dataset(f'dim{i + 1}', data=np.arange(
+                n, dtype=np.float32) * np.float32(step))
+            d.attrs['name'] = axis
+            d.attrs['units'] = f'[{units}]'
+        scalars = group.create_group('tomviz_scalars')
+        scalars[name] = h5py.SoftLink(data.name)
+    out = RawStack(path, (nz, nx, ny), np.float32, offset, mode='r+')
+    out.transpose = (0, 2, 1)   # slabs arrive as (nz, ny, nx)
+    out.shape = (nz, ny, nx)    # what fdk_stream checks against
+    return out
 
 
 def crop_rows(geom, r0, r1):
@@ -147,10 +191,10 @@ def plan_slabs(geom, vol_geom, memory_bytes):
         while lo < hi:  # the largest slab that fits
             mid = (lo + hi + 1) // 2
             r0, r1 = rows_for(geom, vol_geom, z0, z0 + mid)
-            # Rows: being read ahead, filtered, kept from the last slab.
-            # Volume slab: the result, the GPU's read-back copy, and the
-            # previous slab still being written.
-            need = 4 * (3 * n * (r1 - r0) * n_u + 3 * mid * ny * nx)
+            # Rows: read ahead, the next slab being filtered, this slab
+            # on the GPU, and a margin. Volume slab: the result, the GPU's
+            # read-back copy, and the previous slab still being written.
+            need = 4 * (4 * n * (r1 - r0) * n_u + 3 * mid * ny * nx)
             if need <= memory_bytes:
                 lo = mid
             else:
@@ -185,13 +229,15 @@ def fdk_stream(source, geom, vol_geom, target, filter_name='ram-lak',
     Neighbouring slabs need overlapping detector rows. Filtering works row
     by row, so the previous slab's filtered rows are kept and each slab
     reads and filters only the rows new to it (like the resident pages of
-    a paged pool). A reader thread fetches the next slab's new rows while
-    the current slab is filtered and backprojected; a writer thread stores
-    finished slabs.
+    a paged pool). Four stages run at once: a reader thread fetches rows
+    two slabs ahead, a filter thread prepares the next slab on the CPU,
+    the GPU backprojects the current one, and a writer thread stores the
+    previous one.
 
-    Returns timings in seconds: read (waiting for rows), filter,
-    backproject, write (waiting for the writer), total, and the number of
-    detector rows read and filtered (rows)."""
+    Returns timings in seconds: read (the filter thread waiting for
+    rows), filter (CPU time filtering), waiting for filter (the GPU
+    waiting for filtered rows), backproject, write (waiting for the
+    writer), total; and rows, the detector rows read and filtered."""
     import time
     from tomviz.projectors.backend import get_backend
     log = log or (lambda msg: None)
@@ -214,44 +260,60 @@ def fdk_stream(source, geom, vol_geom, target, filter_name='ram-lak',
     def read(i):
         return [source.read_rows(a, b) for a, b in pieces[i]]
 
+    reader = ThreadPoolExecutor(1)
+    filterer = ThreadPoolExecutor(1)
+    writer = ThreadPoolExecutor(1)
+    reads = {0: reader.submit(read, 0)}
+    state = {'kept': None}   # the last filtered slab, for its rows
+
+    def filter_slab(i):
+        """Runs in the filter thread, one slab ahead of the GPU: the new
+        rows read for slab i, filtered, plus the overlap with slab i - 1."""
+        if i + 1 < len(slabs):
+            reads[i + 1] = reader.submit(read, i + 1)
+        a = time.perf_counter()
+        raw = reads.pop(i).result()
+        wait = time.perf_counter() - a
+        a = time.perf_counter()
+        _, _, r0, r1 = slabs[i]
+        filtered = np.empty((geom.n_angles, r1 - r0, geom.n_u),
+                            dtype=np.float32)
+        for (p0, p1), rows in zip(pieces[i], raw):
+            rows = rows.astype(np.float32, copy=False)
+            preweight_and_filter(rows, crop_rows(geom, p0, p1),
+                                 filter_name, cutoff, short_scan,
+                                 out=filtered[:, p0 - r0:p1 - r0])
+        if state['kept'] is not None:
+            k0, k1, kept_rows = state['kept']
+            lo, hi = max(r0, k0), min(r1, k1)
+            if lo < hi:
+                filtered[:, lo - r0:hi - r0] = kept_rows[:, lo - k0:hi - k0]
+        state['kept'] = (r0, r1, filtered)
+        return filtered, wait, time.perf_counter() - a, \
+            sum(q1 - q0 for q0, q1 in pieces[i])
+
     start = time.perf_counter()
-    kept = None   # (r0, r1, filtered rows) of the previous slab
-    with ThreadPoolExecutor(1) as reader, ThreadPoolExecutor(1) as writer:
+    try:
         pending_write = None
-        next_raw = reader.submit(read, 0)
+        next_filtered = filterer.submit(filter_slab, 0)
         for i, (z0, z1, r0, r1) in enumerate(slabs):
             if should_stop is not None and should_stop():
                 return None
             a = time.perf_counter()
-            raw = next_raw.result()
-            t['read'] += time.perf_counter() - a
+            filtered, wait, busy, rows = next_filtered.result()
+            t['waiting for filter'] = t.get('waiting for filter', 0.0) + \
+                time.perf_counter() - a
+            t['read'] += wait
+            t['filter'] += busy
+            t['rows'] += rows
             if i + 1 < len(slabs):
-                next_raw = reader.submit(read, i + 1)
-
-            # Filter the new rows; take the rest from the previous slab.
-            a = time.perf_counter()
-            filtered = np.empty((geom.n_angles, r1 - r0, geom.n_u),
-                                dtype=np.float32)
-            for (p0, p1), rows in zip(pieces[i], raw):
-                rows = rows.astype(np.float32, copy=False)
-                preweight_and_filter(rows, crop_rows(geom, p0, p1),
-                                     filter_name, cutoff, short_scan,
-                                     out=filtered[:, p0 - r0:p1 - r0])
-                t['rows'] += p1 - p0
-            if kept is not None:
-                k0, k1, kept_rows = kept
-                lo, hi = max(r0, k0), min(r1, k1)
-                if lo < hi:
-                    filtered[:, lo - r0:hi - r0] = kept_rows[:, lo - k0:
-                                                             hi - k0]
-            del raw
-            t['filter'] += time.perf_counter() - a
+                next_filtered = filterer.submit(filter_slab, i + 1)
 
             a = time.perf_counter()
             vol = be.backproject(filtered, crop_rows(geom, r0, r1),
                                  slab_geometry(vol_geom, z0, z1))
             t['backproject'] += time.perf_counter() - a
-            kept = (r0, r1, filtered)
+            del filtered
 
             a = time.perf_counter()
             if pending_write is not None:
@@ -264,5 +326,8 @@ def fdk_stream(source, geom, vol_geom, target, filter_name='ram-lak',
         if pending_write is not None:
             pending_write.result()
         t['write'] += time.perf_counter() - a
+    finally:
+        for pool in (reader, filterer, writer):
+            pool.shutdown(wait=True, cancel_futures=True)
     t['total'] = time.perf_counter() - start
     return t
