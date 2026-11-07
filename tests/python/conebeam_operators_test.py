@@ -262,3 +262,66 @@ def test_intensity_uses_the_stored_open_beam_level(line_integrals):
     load_operator_module('IntensityToLineIntegrals').transform(ds)
     np.testing.assert_allclose(ds.active_scalars, to_tomviz(line_integrals),
                                atol=1e-4)
+
+
+def drifting_scan(line_integrals, mid=False):
+    """A beam whose gain drifts linearly over the scan, with flats taken
+    before and after it (and, with mid, half way through)."""
+    rng = np.random.default_rng(7)
+    g0 = rng.uniform(900, 1100, (N_V, N_U)).astype(np.float32)
+    g1 = (g0 * rng.uniform(0.7, 0.9, (N_V, N_U))).astype(np.float32)
+    # The gain drifts linearly in acquisition position, from the flats
+    # taken just before the first projection (position -1) to those just
+    # after the last (position n).
+    n = len(line_integrals)
+    t = (np.arange(n) + 1) / (n + 1)
+    gain = g0[None] * (1 - t[:, None, None]) + g1[None] * t[:, None, None]
+    raw = gain * np.exp(-line_integrals)
+    flats = [g0, g0, g1, g1, g1]
+    positions = [-1, -1, n, n, n]
+    if mid:
+        half = n // 2
+        flats.insert(2, gain[half])
+        positions.insert(2, half)
+    return raw, np.stack(flats), positions
+
+
+def run_flat_dark(raw, flats, **kwargs):
+    ds = make_dataset(to_tomviz(raw), ANGLES)
+    flat_ds = make_dataset(to_tomviz(flats))
+    meta = kwargs.pop('meta', None)
+    if meta:
+        ds.metadata = {'frame_index': meta[0]}
+        flat_ds.metadata = {'frame_index': meta[1]}
+    load_operator_module('FlatDarkCorrection').transform(
+        ds, flat=flat_ds, **kwargs)
+    return ds.active_scalars
+
+
+def test_flat_dark_interpolates_a_drifting_beam(line_integrals):
+    raw, flats, positions = drifting_scan(line_integrals)
+    truth = to_tomviz(line_integrals)
+    averaged = run_flat_dark(raw, flats)
+    assert np.abs(averaged - truth).max() > 0.05     # drift left behind
+    by_count = run_flat_dark(raw, flats, flat_mode='interpolate',
+                             flats_before=2)
+    np.testing.assert_allclose(by_count, truth, atol=2e-3)
+    n = len(line_integrals)
+    by_file = run_flat_dark(raw, flats, flat_mode='interpolate',
+                            meta=(list(range(n)), positions))
+    np.testing.assert_allclose(by_file, truth, atol=2e-3)
+
+
+def test_flat_dark_uses_flats_taken_during_the_scan(line_integrals):
+    # A third flat group half way: interpolation runs through it.
+    raw, flats, positions = drifting_scan(line_integrals, mid=True)
+    n = len(line_integrals)
+    out = run_flat_dark(raw, flats, flat_mode='interpolate',
+                        meta=(list(range(n)), positions))
+    np.testing.assert_allclose(out, to_tomviz(line_integrals), atol=2e-3)
+
+
+def test_flat_dark_interpolation_needs_positions(line_integrals):
+    raw, flats, _ = drifting_scan(line_integrals)
+    with pytest.raises(RuntimeError, match='were taken before it'):
+        run_flat_dark(raw, flats, flat_mode='interpolate')

@@ -18,6 +18,31 @@
       "optional": true
     },
     {
+      "name": "flat_mode",
+      "label": "Flat Fields",
+      "description": "Average: one flat field, the mean of all flat frames. Interpolate: the beam drifts during long scans, so each projection gets a flat interpolated between the flat frames taken before, during and after the scan, by when they were taken (from the file, or from Flats Taken Before the Scan).",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Average": "average"
+        },
+        {
+          "Interpolate Over the Scan": "interpolate"
+        }
+      ]
+    },
+    {
+      "name": "flats_before",
+      "label": "Flats Taken Before the Scan (0 = from the file)",
+      "description": "For files that do not record when each frame was taken: how many of the flat frames (at the start of the flat stack) were taken before the scan; the rest count as taken after it.",
+      "type": "int",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 1000000,
+      "visible_if": "flat_mode == 'interpolate'"
+    },
+    {
       "name": "line_integrals",
       "label": "Convert to Line Integrals (-log)",
       "description": "Output -ln(transmission) instead of transmission.",
@@ -29,7 +54,7 @@
       "label": "Minimum Transmission",
       "description": "Transmission is clipped to at least this before the log, so photon-starved pixels give large finite values instead of infinity.",
       "type": "double",
-      "default": 1e-6,
+      "default": 1e-06,
       "minimum": 1e-12,
       "maximum": 1.0,
       "precision": 8
