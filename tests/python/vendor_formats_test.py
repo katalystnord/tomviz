@@ -293,6 +293,10 @@ def test_nxtomo_diamond_layout(tmp_path):
     dark = _boundary.wrap_vtk_image(result['dark'], legacy=True)
     assert flat.active_scalars.shape == (ROWS, COLS, 2)
     assert dark.active_scalars.shape == (ROWS, COLS, 1)
+    # Places in the acquisition, for interpolating flats over the scan.
+    assert ds.metadata['frame_index'] == [2, 3, 4, 5]
+    assert flat.metadata['frame_index'] == [1, 7]
+    assert dark.metadata['frame_index'] == [0]
 
 
 def test_nxtomo_esrf_layout_radians_and_pixel_size(tmp_path):
