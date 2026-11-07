@@ -80,3 +80,19 @@ def test_operator_centres_the_axis(module):
     # The shift is applied with linear interpolation, which blurs a
     # little; the axis ends up centred well within a pixel.
     assert after == pytest.approx(0.0, abs=0.1)
+
+
+@pytest.mark.parametrize('true_offset', [-9.0, 6.0])
+def test_trial_reconstructions_with_gradient_energy(module, true_offset):
+    # The trial method with gradient energy lands on the nearest whole
+    # pixel. With the maximum (the default) it picked +2 instead of +9,
+    # and -13 instead of -6, on this phantom.
+    angles = np.arange(0, 180.5, 2.0)
+    ds = Dataset({'scalars': tilt_series(angles, true_offset)})
+    ds.spacing = [1.0, 1.0, 1.0]
+    ds.tilt_angles = angles
+    load_operator_class(module).transform(ds, method='reconstruction',
+                                          sharpness_measure='gradient',
+                                          num_slices=2)
+    after = module.opposite_projection_offset(ds.active_scalars, angles)
+    assert after == pytest.approx(0.0, abs=0.6)

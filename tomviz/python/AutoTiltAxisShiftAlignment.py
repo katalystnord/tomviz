@@ -10,6 +10,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
     def transform(self, dataset, transform_source: str = 'generate',
                   method: str = 'reconstruction',
+                  sharpness_measure: str = 'maximum',
                   transform_file: str = '', padding: int = 0,
                   num_slices: int = 5, seed: int = 0,
                   apply_to_all_arrays: bool = True,
@@ -23,6 +24,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
             kwargs = {
                 **shared_kwargs,
                 'method': method,
+                'sharpness_measure': sharpness_measure,
                 'padding': padding,
                 'num_slices': num_slices,
                 'seed': seed,
@@ -39,6 +41,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
         return f(**kwargs)
 
     def transform_generate(self, dataset, method: str = 'reconstruction',
+                           sharpness_measure: str = 'maximum',
                            padding: int = 0,
                            num_slices: int = 5, seed: int = 0,
                            apply_to_all_arrays: bool = True,
@@ -66,6 +69,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
         Nx, Ny, Nz = tiltSeries.shape
 
         shifts = (np.linspace(-20, 20, 41)).astype('int')
+        measure = sharpness if sharpness_measure == 'gradient' else np.amax
 
         # randomly choose slices with top 50% total intensities
         tiltSeriesSum = np.sum(tiltSeries, axis=(1, 2))
@@ -99,7 +103,7 @@ class AutoTiltAxisShiftAlignmentOperator(tomviz.operators.CancelableOperator):
 
                 recon = wbp2(shiftedTiltSeries[s, :, :],
                              tilt_angles, Ny, 'ramp', 'linear')
-                I[i] = I[i] + np.amax(recon)
+                I[i] = I[i] + measure(recon)
 
             step += 1
             self.progress.value = step
@@ -165,6 +169,14 @@ def _edges_to_zero(rows, edge=4):
     right = rows[:, -edge:].mean(axis=1, keepdims=True)
     ramp = np.linspace(0.0, 1.0, n)[None, :]
     return rows - (left + (right - left) * ramp)
+
+
+def sharpness(image):
+    """Gradient energy: mean squared gradient. A misplaced axis smears
+    every edge into an arc and lowers it. (The reconstruction's maximum
+    can instead rise when smeared features overlap.)"""
+    gy, gx = np.gradient(np.asarray(image, dtype=np.float64))
+    return float(np.mean(gx ** 2 + gy ** 2))
 
 
 def opposite_projection_offset(tilt_series, angles, max_pairs=12):

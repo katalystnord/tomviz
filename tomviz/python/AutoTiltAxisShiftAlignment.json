@@ -39,6 +39,22 @@
       "visible_if": "transform_source == 'generate'"
     },
     {
+      "name": "sharpness_measure",
+      "label": "Sharpness Measure",
+      "description": "How the trial reconstructions are compared. Maximum: the brightest voxel. Gradient Energy: the mean squared gradient, which a misplaced axis lowers by smearing every edge; on test phantoms and on the NSLS-II HXN fluorescence example it picked the shift that reconstructs without doubled edges where the maximum did not.",
+      "type": "enumeration",
+      "default": 0,
+      "options": [
+        {
+          "Maximum": "maximum"
+        },
+        {
+          "Gradient Energy": "gradient"
+        }
+      ],
+      "visible_if": "transform_source == 'generate' and method == 'reconstruction'"
+    },
+    {
       "name": "transform_file",
       "label": "Transform File",
       "description": "Transformation file (npz format) to apply",
