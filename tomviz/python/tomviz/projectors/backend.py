@@ -31,6 +31,8 @@ class Backend:
     forward_project: Callable
     # Optional: the whole SIRT loop on the device (see webgpu.sirt_loop).
     sirt_loop: Optional[Callable] = None
+    # A software adapter (lavapipe, WARP): GPU code running on the CPU.
+    software: bool = False
 
 
 def cpu_backend(reason=None):

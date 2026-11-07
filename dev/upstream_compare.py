@@ -7,8 +7,10 @@ Shepp-Logan problem.
     python dev/upstream_compare.py sirt-quality N N_PROJ ITERATIONS BACKEND
     python dev/upstream_compare.py tilt-series N N_PROJ BACKEND...
 
-BACKEND is upstream, gpu, cpu (numpy) or lavapipe (gpu with
-VK_DRIVER_FILES pointing at Mesa's lavapipe, set by the caller). Run from
+BACKEND is upstream, gpu, cpu (the numpy projectors), lavapipe (gpu with
+VK_DRIVER_FILES pointing at Mesa's lavapipe, set by the caller), or joseph
+or siddon (the CPU with a sparse matrix per slice,
+tomviz.projectors.sparse). Run from
 the repository root with the upstream remote fetched.
 """
 
@@ -91,6 +93,14 @@ def orient(slices, how):
     return a[:, :, ::-1] if f2 else a
 
 
+def ours(be):
+    """Backend and cpu_matrix for one of our BACKEND names."""
+    from tomviz.projectors.backend import get_backend
+    if be in ('joseph', 'siddon'):
+        return get_backend('cpu'), be
+    return get_backend('gpu' if be == 'lavapipe' else be), 'none'
+
+
 def sirt_time(N, n_proj, backends):
     _, vg, angles, g, truth, proj = problem(N, n_proj)
     for be in backends:
@@ -112,18 +122,20 @@ def sirt_time(N, n_proj, backends):
                   f'{t_matrix:.1f} s ({A.nnz / 1e6:.0f} M non-zeros), '
                   f'{per:.2f} s per iteration')
         else:
-            from tomviz.projectors.backend import get_backend
             from tomviz.projectors.sirt import sirt
-            b = get_backend('gpu' if be == 'lavapipe' else be)
+            b, matrix = ours(be)
+            # Many iterations on fast paths: setup varies run to run.
+            many = 3 if be == 'cpu' else 21
             times = []
-            for niter in (1, 3):
+            for niter in (1, many):
                 a = time.perf_counter()
-                sirt(proj, g, vg, iterations=niter, backend=b)
+                sirt(proj, g, vg, iterations=niter, backend=b,
+                     cpu_matrix=matrix)
                 times.append(time.perf_counter() - a)
-            per = (times[1] - times[0]) / 2
+            per = (times[1] - times[0]) / (many - 1)
             print(f'our SIRT on {be} ({b.description}), {N}^3 from '
                   f'{n_proj}: setup and first iteration {times[0]:.1f} s, '
-                  f'{per:.2f} s per iteration')
+                  f'{per:.3f} s per iteration')
 
 
 def sirt_quality(N, n_proj, iterations, backend):
@@ -170,9 +182,8 @@ def sirt_quality(N, n_proj, iterations, backend):
                 f'step 1/||A||^2 = {step:.2e}'
             print(f'  upstream SIRT, {label}: RMSE ' + ', '.join(line))
     else:
-        from tomviz.projectors.backend import get_backend
         from tomviz.projectors.sirt import sirt
-        b = get_backend('gpu' if backend == 'lavapipe' else backend)
+        b, matrix = ours(backend)
         out = {}
 
         def record(it, x):
@@ -180,8 +191,9 @@ def sirt_quality(N, n_proj, iterations, backend):
                 out[it + 1] = float(np.sqrt(np.mean((x - truth) ** 2)))
 
         sirt(proj, g, vg, iterations=iterations, backend=b,
-             callback=record, volume_needed=lambda it: it + 1 in marks)
-        print(f'  our SIRT ({b.description}): RMSE ' +
+             callback=record, volume_needed=lambda it: it + 1 in marks,
+             cpu_matrix=matrix)
+        print(f'  our SIRT ({backend}, {b.description}): RMSE ' +
               ', '.join(f'{k}: {v:.4f}' for k, v in sorted(out.items())))
     print(f'  (phantom RMSE against zero: '
           f'{float(np.sqrt(np.mean(truth ** 2))):.4f})')

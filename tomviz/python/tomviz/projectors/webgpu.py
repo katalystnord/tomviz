@@ -1111,5 +1111,6 @@ def make_backend():
         _failure = str(e) or type(e).__name__
         raise
     _cached = Backend('gpu', bp.description, bp.backproject,
-                      bp.forward_project, bp.sirt_loop)
+                      bp.forward_project, bp.sirt_loop,
+                      software=bp.adapter.info['adapter_type'] == 'CPU')
     return _cached

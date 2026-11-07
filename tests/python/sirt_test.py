@@ -94,7 +94,7 @@ def test_sirt_rejects_bad_input(sparse_cone):
 def test_sirt_gpu_matches_cpu(sparse_cone):
     be = gpu_backend()
     g, vg, proj, _ = sparse_cone
-    cpu = sirt(proj, g, vg, iterations=5, backend='cpu')
+    cpu = sirt(proj, g, vg, iterations=5, backend='cpu', cpu_matrix='none')
     gpu = sirt(proj, g, vg, iterations=5, backend=be)
     np.testing.assert_allclose(gpu, cpu, atol=1e-4 * abs(cpu).max())
 
@@ -118,7 +118,9 @@ def test_sirt_gpu_resident_matches_streaming(sparse_cone, phantom,
         vg = VolumeGeometry((20, 28, 28), 0.75)
         proj = phantom.project(g)
     x0 = np.full(vg.shape, 0.01, dtype=np.float32)
-    kw = dict(iterations=4, nonnegative=False, x0=x0)
+    # The backends' own projectors throughout (a software adapter would
+    # otherwise project parallel beams with the sparse slice matrix).
+    kw = dict(iterations=4, nonnegative=False, x0=x0, cpu_matrix='none')
     cpu = sirt(proj, g, vg, backend='cpu', **kw)
     streamed = sirt(proj, g, vg, backend=streaming(be), **kw)
     notes = []
@@ -146,7 +148,7 @@ def test_sirt_gpu_callback_volume_needed_and_stop(sparse_cone):
     assert [it for it, _ in seen] == [0, 1, 2, 3]
     assert seen[0][1] is None and seen[2][1] is None
     np.testing.assert_array_equal(seen[3][1], x)
-    ref = sirt(proj, g, vg, iterations=4, backend='cpu')
+    ref = sirt(proj, g, vg, iterations=4, backend='cpu', cpu_matrix='none')
     np.testing.assert_allclose(x, ref, atol=1e-4 * abs(ref).max())
     calls = []
 
@@ -167,7 +169,7 @@ def test_sirt_gpu_falls_back_when_too_big(sparse_cone, monkeypatch):
     notes = []
     x = sirt(proj, g, vg, iterations=3, backend=be, log=notes.append)
     assert any('streams' in n for n in notes)
-    ref = sirt(proj, g, vg, iterations=3, backend='cpu')
+    ref = sirt(proj, g, vg, iterations=3, backend='cpu', cpu_matrix='none')
     np.testing.assert_allclose(x, ref, atol=1e-4 * abs(ref).max())
 
 
