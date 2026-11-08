@@ -57,7 +57,7 @@ def reconstruct_to_file(path, output, beam='auto', method='fbp',
     pixel_size: 0 takes it from the file; parallel beams without one are
     reconstructed in pixel units.
     find_axis: for parallel beams, find offset_u from projections 180
-    degrees apart.
+    degrees apart; when that is not possible, the given offset_u is used.
     arc: degrees covered, when the file stores no angles (evenly spaced,
     the last projection one step short of the arc).
     intensity: 'auto', 'none', 'flat' or 'open-beam' (scan.line_integrals).
@@ -85,9 +85,17 @@ def reconstruct_to_file(path, output, beam='auto', method='fbp',
                 pixel_size = 1.0
                 log('no pixel size in the file: lengths in pixels')
             if find_axis:
-                offset_u = axis_offset_from_opposite(source, angles)
-                log(f'rotation axis {offset_u:+.2f} pixels from the '
-                    'detector centre')
+                try:
+                    found = axis_offset_from_opposite(source, angles)
+                except RuntimeError as e:
+                    log(f'rotation axis not found ({e}); using the given '
+                        f'offset, {offset_u:+.2f} pixels')
+                else:
+                    note = f' (replaces the given {offset_u:+.2f})' if \
+                        offset_u else ''
+                    offset_u = found
+                    log(f'rotation axis {offset_u:+.2f} pixels from the '
+                        f'detector centre{note}')
             geom = ParallelGeometry.circular(
                 angles, pixel_size, pixel_size, n_u, n_v,
                 offset_u=offset_u, offset_v=offset_v, clockwise=clockwise)

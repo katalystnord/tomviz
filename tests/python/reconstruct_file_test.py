@@ -91,6 +91,7 @@ def test_data_exchange_with_flats_and_darks(scan, tmp_path):
         f['exchange/data_white'] = np.stack([I0 * gain + dark] * 3)
         f['exchange/data_dark'] = np.full((2,) + counts.shape[1:], dark,
                                           np.float32)
+        f['exchange/theta'] = np.arange(0, 360, 3.0)
     s = open_scan(path)
     assert s.kind == 'Data Exchange' and s.flat is not None
     out = tmp_path / 'vol.emd'
@@ -265,3 +266,122 @@ def test_parallel_beam_data_exchange_with_the_axis_found(tmp_path, method):
     # The axis is found to a few hundredths of a pixel, not exactly.
     rel = np.sqrt(np.mean((vol - expected) ** 2)) / np.abs(expected).max()
     assert rel < 0.01, rel
+
+
+def test_integer_counts_in_npy_and_raw(scan, tmp_path):
+    # RawStack returns the file's own dtype: uint16 counts must not be
+    # corrected in place (that raised a casting error).
+    g, counts, seen = scan
+    np.save(tmp_path / 'counts.npy', counts)
+    counts.tofile(tmp_path / 'counts.raw')
+    ref = reference(g, seen)
+    out = tmp_path / 'a.emd'
+    assert main([str(tmp_path / 'counts.npy'), str(out), '--i0', str(I0)] +
+                GEOMETRY) == 0
+    close(emd_volume(out), ref)
+    out = tmp_path / 'b.emd'
+    assert main([str(tmp_path / 'counts.raw'), str(out), '--raw-shape',
+                 *map(str, counts.shape), '--raw-dtype', 'uint16'] +
+                GEOMETRY) == 0   # open beam estimated from the counts
+    vol = emd_volume(out)
+    assert np.isfinite(vol).all()
+    assert np.corrcoef(vol.ravel(), ref.ravel())[0, 1] > 0.99
+
+
+@pytest.mark.parametrize('angles,offset', [
+    (np.arange(0, 180.1, 1.0), 3.3),     # both ends: exact pairs
+    (np.arange(0, 180, 1.0), 3.3),       # one step short of 180
+    (np.arange(0, 180, 0.6), -7.6),
+    (np.arange(0, 360, 1.0), 5.2),
+])
+def test_axis_found_with_or_without_exact_opposite_views(angles, offset):
+    from tomviz.conebeam.scan import axis_offset_from_opposite
+    from tomviz.projectors import ParallelGeometry
+    phantom = EllipsoidPhantom.shepp_logan(radius=10.0)
+    g = ParallelGeometry.circular(angles, 0.25, 0.25, 128, 48,
+                                  offset_u=offset)
+    proj = phantom.project(g).astype(np.float32)
+
+    class Memory:
+        shape = proj.shape
+
+        def read_rows(self, r0, r1):
+            return proj[:, r0:r1]
+
+    assert axis_offset_from_opposite(Memory(), angles) == \
+        pytest.approx(offset, abs=0.1)
+
+
+def test_axis_needs_a_view_near_180_degrees_on():
+    from tomviz.conebeam.scan import axis_offset_from_opposite
+
+    class Memory:
+        shape = (140, 8, 32)
+
+        def read_rows(self, r0, r1):
+            return np.ones((140, r1 - r0, 32), np.float32)
+
+    with pytest.raises(RuntimeError, match='180 degrees apart'):
+        axis_offset_from_opposite(Memory(), np.arange(10, 150, 1.0))
+
+
+def test_given_offset_used_when_the_axis_cannot_be_found(tmp_path):
+    import builtins
+    import h5py
+    from tomviz.projectors import ParallelGeometry
+    phantom = EllipsoidPhantom.shepp_logan(radius=5.0)
+    angles = np.arange(10, 150, 2.0)      # no view near 180 degrees on
+    g = ParallelGeometry.circular(angles, 0.25, 0.25, 64, 24,
+                                  offset_u=1.5)
+    path = tmp_path / 'scan.h5'
+    with h5py.File(path, 'w') as f:
+        f['exchange/data'] = phantom.project(g).astype(np.float32)
+        f['exchange/theta'] = angles
+    printed = []
+    real = builtins.print
+    builtins.print = lambda *a, **k: printed.append(' '.join(map(str, a)))
+    try:
+        assert main([str(path), str(tmp_path / 'v.emd'), '--find-axis',
+                     '--offset-u', '1.5', '--intensity', 'none',
+                     '--pixel-size', '0.25', '--memory-gb', '0.0002']) == 0
+    finally:
+        builtins.print = real
+    assert any('not found' in line and '+1.50' in line for line in printed)
+
+
+def test_paths_with_brackets_are_files_not_patterns(scan, tmp_path):
+    import h5py
+    import tifffile
+    _, counts, _ = scan
+    folder = tmp_path / 'run[3]'
+    folder.mkdir()
+    with h5py.File(folder / 'scan.h5', 'w') as f:
+        f['exchange/data'] = counts
+    assert open_scan(folder / 'scan.h5').shape == counts.shape
+    for k in range(3):
+        tifffile.imwrite(folder / f'p[{k}].tif', counts[k])
+    assert open_scan(folder).shape == (3,) + counts.shape[1:]
+    assert open_scan(folder / 'p[1].tif').shape == (1,) + counts.shape[1:]
+    # A pattern still works where no such file exists.
+    assert open_scan(str(tmp_path / 'run?3?' / '*.tif')).shape[0] == 3
+
+
+def test_data_exchange_angles(tmp_path):
+    import h5py
+    data = np.zeros((6, 4, 5), np.float32)
+    with h5py.File(tmp_path / 'deg.h5', 'w') as f:
+        f['exchange/data'] = data
+        f['exchange/theta'] = np.arange(6) * 30.0
+    np.testing.assert_allclose(open_scan(tmp_path / 'deg.h5').angles,
+                               np.arange(6) * 30.0)
+    with h5py.File(tmp_path / 'rad.h5', 'w') as f:
+        f['exchange/data'] = data
+        f['exchange/theta'] = np.radians(np.arange(6) * 30.0)
+        f['exchange/theta'].attrs['units'] = 'rad'
+    np.testing.assert_allclose(open_scan(tmp_path / 'rad.h5').angles,
+                               np.arange(6) * 30.0)
+    with h5py.File(tmp_path / 'none.h5', 'w') as f:
+        f['exchange/data'] = data
+    # The format: evenly spaced over 180 degrees when theta is missing.
+    np.testing.assert_allclose(open_scan(tmp_path / 'none.h5').angles,
+                               np.arange(6) * 30.0)

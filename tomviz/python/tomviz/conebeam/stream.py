@@ -19,6 +19,7 @@ The result is identical to the in-memory fdk(), up to float rounding.
 
 from concurrent.futures import ThreadPoolExecutor
 import os
+import threading
 
 import numpy as np
 
@@ -26,6 +27,47 @@ from tomviz.projectors.geometry import (ConeGeometry, ParallelGeometry,
                                         VolumeGeometry)
 
 from .filtering import preweight_and_filter
+
+# Windows opens files in text mode (newline translation) without O_BINARY.
+O_BINARY = getattr(os, 'O_BINARY', 0)
+_seek_lock = threading.Lock()
+
+
+def read_at(fd, view, offset):
+    """Fill view (a writable byte memoryview) from the file at offset.
+    Positioned reads release the GIL and leave the file position alone,
+    so threads can share a file: os.preadv (Linux, BSD), else os.pread
+    (other Unix, macOS), else a seek and read under a lock (Windows).
+    Partial reads are continued; only the end of the file stops it."""
+    done, size = 0, len(view)
+    while done < size:
+        if hasattr(os, 'preadv'):
+            got = os.preadv(fd, [view[done:]], offset + done)
+        else:
+            if hasattr(os, 'pread'):
+                data = os.pread(fd, size - done, offset + done)
+            else:
+                with _seek_lock:
+                    os.lseek(fd, offset + done, os.SEEK_SET)
+                    data = os.read(fd, size - done)
+            got = len(data)
+            view[done:done + got] = data
+        if got == 0:
+            raise IOError(f'unexpected end of file at byte {offset + done}')
+        done += got
+
+
+def write_at(fd, view, offset):
+    """Write view (a byte memoryview) to the file at offset, as read_at:
+    os.pwrite where it exists (Unix), else a seek and write under a lock."""
+    done = 0
+    while done < len(view):
+        if hasattr(os, 'pwrite'):
+            done += os.pwrite(fd, view[done:], offset + done)
+        else:
+            with _seek_lock:
+                os.lseek(fd, offset + done, os.SEEK_SET)
+                done += os.write(fd, view[done:])
 
 
 class RawStack:
@@ -42,7 +84,7 @@ class RawStack:
         self.offset = int(offset)
         flags = {'r': os.O_RDONLY, 'r+': os.O_RDWR,
                  'w': os.O_RDWR | os.O_CREAT}[mode]
-        self.fd = os.open(path, flags, 0o644)
+        self.fd = os.open(path, flags | O_BINARY, 0o644)
         self.transpose = None
         if mode == 'w':
             size = self.offset + int(np.prod(self.shape)) * \
@@ -66,14 +108,13 @@ class RawStack:
         rows = r1 - r0
         if out is None:
             out = np.empty((n, rows, n_u), dtype=self.dtype)
-        size = rows * n_u * self.dtype.itemsize
         for k in range(n):
             start = self.offset + ((k * n_v + r0) * n_u) * \
                 self.dtype.itemsize
-            view = memoryview(out[k]).cast('B')
-            got = os.preadv(self.fd, [view], start)
-            if got != size:
-                raise IOError(f'{self.path}: short read')
+            try:
+                read_at(self.fd, memoryview(out[k]).cast('B'), start)
+            except IOError as e:
+                raise IOError(f'{self.path}: {e}') from e
         return out
 
     def write_slab(self, z0, data):
@@ -83,10 +124,7 @@ class RawStack:
         data = np.ascontiguousarray(data, dtype=self.dtype)
         start = self.offset + z0 * int(np.prod(self.shape[1:])) * \
             self.dtype.itemsize
-        view = memoryview(data).cast('B')
-        done = 0
-        while done < len(view):
-            done += os.pwrite(self.fd, view[done:], start + done)
+        write_at(self.fd, memoryview(data).cast('B'), start)
 
 
 def create_emd(path, vol_geom, units='mm', name='FDK'):
@@ -161,9 +199,11 @@ def rows_for(geom, vol_geom, z0, z1, margin=2):
         raise RuntimeError('Part of the volume is behind the source; make '
                            'the volume smaller')
     v = h[:, :, 1] / h[:, :, 2]
-    r0 = int(np.clip(np.floor(v.min()) - margin, 0, geom.n_v))
-    r1 = int(np.clip(np.ceil(v.max()) + margin + 1, 0, geom.n_v))
-    return r0, max(r1, r0 + 1)
+    # Always a window inside the detector, even for slices that project
+    # off it (they then backproject nothing, as in memory).
+    r0 = int(np.clip(np.floor(v.min()) - margin, 0, geom.n_v - 1))
+    r1 = int(np.clip(np.ceil(v.max()) + margin + 1, r0 + 1, geom.n_v))
+    return r0, r1
 
 
 def default_memory_bytes(fraction=0.5, floor=1 << 30):
@@ -314,11 +354,21 @@ def fdk_stream(source, geom, vol_geom, target, filter_name='ram-lak',
             if i + 1 < len(slabs):
                 next_filtered = filterer.submit(filter_slab, i + 1)
 
+            def slab_progress(done, total, i=i):
+                if progress is not None:
+                    progress((i + done / max(total, 1)) / len(slabs))
+
+            # Cancel and progress within the slab too: slabs can hold
+            # hundreds of slices and take minutes.
             a = time.perf_counter()
             vol = be.backproject(filtered, crop_rows(geom, r0, r1),
-                                 slab_geometry(vol_geom, z0, z1))
+                                 slab_geometry(vol_geom, z0, z1),
+                                 progress=slab_progress,
+                                 should_stop=should_stop)
             t['backproject'] += time.perf_counter() - a
             del filtered
+            if vol is None:
+                return None
 
             a = time.perf_counter()
             if pending_write is not None:

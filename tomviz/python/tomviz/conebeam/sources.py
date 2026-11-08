@@ -83,12 +83,13 @@ class FrameFiles:
         n_u = self.shape[2]
         file_dtype = self.dtype.newbyteorder(byteorder)
         buf = np.empty((r1 - r0, n_u), dtype=file_dtype)
-        fd = os.open(path, os.O_RDONLY)
+        from .stream import O_BINARY, read_at
+        fd = os.open(path, os.O_RDONLY | O_BINARY)
         try:
-            start = offset + r0 * n_u * file_dtype.itemsize
-            if os.preadv(fd, [memoryview(buf).cast('B')], start) != \
-                    buf.nbytes:
-                raise IOError(f'{path}: short read')
+            read_at(fd, memoryview(buf).cast('B'),
+                    offset + r0 * n_u * file_dtype.itemsize)
+        except IOError as e:
+            raise IOError(f'{path}: {e}') from e
         finally:
             os.close(fd)
         out[...] = buf
@@ -177,7 +178,9 @@ class LineIntegrals:
                              'level')
 
     def read_rows(self, r0, r1):
-        t = self.source.read_rows(r0, r1)
+        # Sources may return integer counts (RawStack keeps the file's
+        # dtype): corrected in float32, in place only on a float32 band.
+        t = np.asarray(self.source.read_rows(r0, r1), dtype=np.float32)
         dark = _as_band(self.dark, r0, r1)
         gain = _as_band(self.flat, r0, r1) - dark
         dead = gain <= 0

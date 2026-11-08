@@ -73,14 +73,20 @@ def _vendor(path):
                 kind=name)
 
 
+def _is_pattern(path):
+    """A glob pattern, not a file: * ? [ in a path that does not exist
+    (folders and files may have brackets in their names)."""
+    return not os.path.exists(path) and any(c in path for c in '*?[')
+
+
 def _tiff_files(path):
     if os.path.isdir(path):
-        files = sorted(f for f in glob.glob(os.path.join(path, '*'))
+        files = sorted(os.path.join(path, f) for f in os.listdir(path)
                        if f.lower().endswith(('.tif', '.tiff')))
         if not files:
             raise RuntimeError(f'{path}: no TIFF files in the folder')
         return files
-    if any(c in path for c in '*?['):
+    if _is_pattern(path):
         files = sorted(glob.glob(path))
         if not files:
             raise RuntimeError(f'{path}: no files match')
@@ -106,7 +112,7 @@ def open_scan(path, dataset=None, raw_shape=None, raw_dtype='float32',
         return scan
     low = path.lower()
     if os.path.isdir(path) or low.endswith(('.tif', '.tiff')) or \
-            any(c in path for c in '*?['):
+            _is_pattern(path):
         return Scan(FrameFiles(_tiff_files(path)), kind='TIFF frames')
     if low.endswith('.npy'):
         return Scan(RawStack.npy(path), kind='.npy stack')
@@ -119,6 +125,23 @@ def open_scan(path, dataset=None, raw_shape=None, raw_dtype='float32',
                 kind='raw frames')
 
 
+def _exchange_theta(f, n):
+    """Data Exchange projection angles in degrees. The format stores them
+    in degrees (units "deg"); a units attribute saying radians is honoured
+    all the same. Without /exchange/theta the format takes the
+    projections as evenly spaced over 180 degrees."""
+    if 'exchange/theta' not in f:
+        return np.arange(n) * (180.0 / n)
+    theta = f['exchange/theta']
+    units = theta.attrs.get('units', 'deg')
+    if isinstance(units, bytes):
+        units = units.decode('utf-8', 'replace')
+    values = np.asarray(theta[()], dtype=np.float64).ravel()
+    if str(units).strip().lower() in ('rad', 'radian', 'radians'):
+        values = np.degrees(values)
+    return values
+
+
 def _open_hdf5(path, dataset):
     import h5py
     if dataset:
@@ -128,8 +151,7 @@ def _open_hdf5(path, dataset):
             names = {k: f'exchange/{n}' for k, n in
                      (('data', 'data'), ('flat', 'data_white'),
                       ('dark', 'data_dark')) if f'exchange/{n}' in f}
-            angles = f['exchange/theta'][()] if 'exchange/theta' in f \
-                else None
+            angles = _exchange_theta(f, f['exchange/data'].shape[0])
             index = None
         else:
             try:
@@ -245,40 +267,58 @@ def axis_offset_from_opposite(source, angles, n_rows=16, max_pairs=12):
 
     The same method as the opposite-projections option of Tilt Axis Shift
     Alignment, on n_rows detector rows spread over the frame, read from
-    the source, so the scan is never loaded."""
+    the source, so the scan is never loaded. A view with no partner
+    exactly 180 degrees on, but one within an angular step (as in scans
+    over [0, 180) that stop one step short), is paired with the opposite
+    view interpolated, or extrapolated, from the two views nearest to
+    it."""
     angles = np.asarray(angles, dtype=np.float64).ravel()
     n_angles, n_v, n_u = source.shape
     if len(angles) != n_angles:
         raise RuntimeError('Every projection needs an angle')
     steps = np.diff(np.sort(angles))
     step = np.median(steps[steps > 0]) if np.any(steps > 0) else 1.0
-    tolerance = max(0.25 * step, 1e-3)
-    pairs = []
+    exact = max(0.25 * step, 1e-3)
+    pairs = []   # (i, j0, j1, w): view i against (1 - w) p[j0] + w p[j1]
     for i, a in enumerate(angles):
-        gap = np.abs(np.mod(angles - a, 360.0) - 180.0)
-        j = int(np.argmin(gap))
-        if gap[j] <= tolerance and i < j:
-            pairs.append((i, j))
+        # Signed angular distance of every view from a + 180, in (-180, 180]
+        d = np.mod(angles - a - 180.0 + 180.0, 360.0) - 180.0
+        order = np.argsort(np.abs(d))
+        j0 = int(order[0])
+        if abs(d[j0]) <= exact:
+            if i < j0:
+                pairs.append((i, j0, j0, 0.0))
+            continue
+        if abs(d[j0]) > 1.001 * step or i == j0:
+            continue
+        j1 = int(order[1])
+        if d[j1] == d[j0] or abs(d[j1]) > 2.001 * step:
+            continue
+        # target (distance 0) = d[j0] + w (d[j1] - d[j0])
+        w = -d[j0] / (d[j1] - d[j0])
+        if i < min(j0, j1) or not any(p[0] in (j0, j1) for p in pairs):
+            pairs.append((i, j0, j1, float(w)))
     if not pairs:
         raise RuntimeError(
-            'Finding the rotation axis needs projections 180 degrees apart '
-            '(scans over 180 degrees with both ends, or over 360); give '
-            'the axis offset instead')
+            'Finding the rotation axis needs projections 180 degrees apart, '
+            'or within one angular step of it (scans over 180 degrees, '
+            'or over 360); give the axis offset instead')
     pick = [pairs[k] for k in np.unique(np.linspace(
         0, len(pairs) - 1, min(max_pairs, len(pairs))).astype(int))]
     rows = np.unique(np.linspace(n_v * 0.1, n_v * 0.9 - 1,
                                  min(n_rows, n_v)).astype(int))
     # (n_angles, rows, n_u), only the projections of the chosen pairs kept
-    wanted = sorted({k for p in pick for k in p})
+    wanted = sorted({k for p in pick for k in p[:3]})
     band = np.concatenate([source.read_rows(r, r + 1)[wanted]
                            for r in rows], axis=1)
     where = {k: i for i, k in enumerate(wanted)}
     up = 16
     size = 2 * n_u * up
     offsets = []
-    for i, j in pick:
+    for i, j0, j1, w in pick:
         a = _edges_to_zero(band[where[i]])
-        b = _edges_to_zero(band[where[j]][:, ::-1])
+        opposite = (1 - w) * band[where[j0]] + w * band[where[j1]]
+        b = _edges_to_zero(opposite[:, ::-1])
         spectrum = (np.fft.rfft(a, 2 * n_u, axis=1) *
                     np.conj(np.fft.rfft(b, 2 * n_u, axis=1))).sum(axis=0)
         cc = np.fft.irfft(spectrum, size)

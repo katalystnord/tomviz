@@ -99,3 +99,108 @@ def test_streams_into_an_emd_file_tomviz_opens(scan, tmp_path):
                                atol=1e-5 * np.abs(expected.active_scalars)
                                .max())
     np.testing.assert_allclose(opened.spacing, expected.spacing, rtol=1e-6)
+
+
+@pytest.mark.parametrize('platform', ['preadv', 'pread', 'seek'])
+def test_positioned_io_on_every_platform(scan, tmp_path, monkeypatch,
+                                         platform):
+    # Linux has preadv, other Unix and macOS only pread and pwrite,
+    # Windows neither: the same reconstruction through each.
+    import os
+    if platform != 'preadv':
+        monkeypatch.delattr(os, 'preadv', raising=False)
+    if platform == 'seek':
+        monkeypatch.delattr(os, 'pread', raising=False)
+        monkeypatch.delattr(os, 'pwrite', raising=False)
+    g, vg, proj = scan
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    src = RawStack.npy(str(tmp_path / 'proj.npy'))
+    out = RawStack(str(tmp_path / 'vol.raw'), vg.shape, mode='w')
+    fdk_stream(src, g, vg, out, backend='cpu', memory_bytes=400_000)
+    src.close()
+    out.close()
+    streamed = np.fromfile(tmp_path / 'vol.raw', np.float32).reshape(
+        vg.shape)
+    reference = fdk(proj, g, vg, backend='cpu')
+    np.testing.assert_allclose(streamed, reference,
+                               atol=1e-5 * np.abs(reference).max())
+
+
+def test_partial_reads_are_continued(tmp_path, monkeypatch):
+    import os
+    from tomviz.conebeam.stream import read_at
+    data = np.arange(1000, dtype=np.float32)
+    data.tofile(tmp_path / 'd.raw')
+    real = os.preadv
+
+    def stingy(fd, buffers, offset):   # at most 100 bytes a call
+        return real(fd, [buffers[0][:100]], offset)
+
+    monkeypatch.setattr(os, 'preadv', stingy, raising=False)
+    out = np.empty(1000, np.float32)
+    fd = os.open(tmp_path / 'd.raw', os.O_RDONLY)
+    try:
+        read_at(fd, memoryview(out).cast('B'), 0)
+        with pytest.raises(IOError, match='end of file'):
+            read_at(fd, memoryview(np.empty(10, np.float32)).cast('B'),
+                    3990)
+    finally:
+        os.close(fd)
+    np.testing.assert_array_equal(out, data)
+
+
+def test_slabs_beyond_the_detector(scan, tmp_path):
+    # A volume much taller than the detector sees: its top and bottom
+    # slabs project off the detector and come out as zeros, as in memory.
+    g, _, proj = scan
+    vg = VolumeGeometry((90, 32, 32), 0.6)
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    src = RawStack.npy(str(tmp_path / 'proj.npy'))
+    out = RawStack(str(tmp_path / 'vol.raw'), vg.shape, mode='w')
+    fdk_stream(src, g, vg, out, backend='cpu', memory_bytes=400_000)
+    src.close()
+    out.close()
+    streamed = np.fromfile(tmp_path / 'vol.raw', np.float32).reshape(
+        vg.shape)
+    reference = fdk(proj, g, vg, backend='cpu')
+    np.testing.assert_allclose(streamed, reference,
+                               atol=1e-5 * np.abs(reference).max())
+    assert np.all(streamed[:5] == 0) and np.all(streamed[-5:] == 0)
+
+
+@pytest.mark.parametrize('backend', ['cpu', 'gpu'])
+def test_cancel_and_progress_within_a_slab(scan, tmp_path, backend):
+    if backend == 'gpu':
+        pytest.importorskip('wgpu')
+        from tomviz.projectors.backend import get_backend
+        try:
+            backend = get_backend('gpu')
+        except RuntimeError as e:
+            pytest.skip(str(e))
+    g, vg, proj = scan
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    seen = []
+
+    def run(stop_after):
+        src = RawStack.npy(str(tmp_path / 'proj.npy'))
+        out = RawStack(str(tmp_path / 'vol.raw'), vg.shape, mode='w')
+        calls = []
+
+        def should_stop():
+            calls.append(1)
+            return len(calls) > stop_after
+        try:
+            # One slab: everything in memory.
+            return fdk_stream(src, g, vg, out, backend=backend,
+                              memory_bytes=1 << 30, progress=seen.append,
+                              should_stop=should_stop)
+        finally:
+            src.close()
+            out.close()
+
+    assert run(stop_after=10 ** 9) is not None
+    if backend == 'cpu':
+        # Progress inside the one slab (the GPU reports per dispatch, and
+        # this small volume is one dispatch).
+        assert any(0 < f < 1 for f in seen)
+    assert run(stop_after=2) is None      # stopped inside the slab
