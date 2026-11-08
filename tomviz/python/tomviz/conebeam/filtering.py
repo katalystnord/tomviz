@@ -222,27 +222,18 @@ def preweight_and_filter(projections, geom, filter_name='ram-lak',
     red, note = redundancy_weights(geom, short_scan)
     dbeta = angular_steps(geom.angles())
     pitch_u = np.linalg.norm(geom.det_u, axis=1)
-    if isinstance(geom, ParallelGeometry):
-        H = H.astype(np.complex64)
-        for k in range(geom.n_angles):
-            # No fan: the detector samples the object at its own pitch.
-            column = (red[k] * (dbeta[k] / pitch_u[k])).astype(np.float32)
-            row = proj[k] * column[None, :]
-            F = _fft.rfft(row, n=n_fft, axis=1, **_FFT_KW)
-            F *= H
-            out[k] = _fft.irfft(F, n=n_fft, axis=1,
-                                **_FFT_KW)[:, :geom.n_u]
-        return out, note
-    pu, pv = geom.principal_point()
-    sod, sdd = geom.sod(), geom.sdd()
-    pitch_u = np.linalg.norm(geom.det_u, axis=1)
-    iu = np.arange(geom.n_u, dtype=np.float64)
-    iv = np.arange(geom.n_v, dtype=np.float64)
-
-    uu = np.einsum('ij,ij->i', geom.det_u, geom.det_u)
-    vv = np.einsum('ij,ij->i', geom.det_v, geom.det_v)
-    uv = np.einsum('ij,ij->i', geom.det_u, geom.det_v)
     H = H.astype(np.complex64)
+    # A parallel beam is the same loop with no fan: no cosine weight, and
+    # the detector samples the object at its own pitch.
+    parallel = isinstance(geom, ParallelGeometry)
+    if not parallel:
+        pu, pv = geom.principal_point()
+        sod, sdd = geom.sod(), geom.sdd()
+        iu = np.arange(geom.n_u, dtype=np.float64)
+        iv = np.arange(geom.n_v, dtype=np.float64)
+        uu = np.einsum('ij,ij->i', geom.det_u, geom.det_u)
+        vv = np.einsum('ij,ij->i', geom.det_v, geom.det_v)
+        uv = np.einsum('ij,ij->i', geom.det_u, geom.det_v)
 
     cos_key, cos_w = None, None
     for k in range(geom.n_angles):
@@ -250,10 +241,11 @@ def preweight_and_filter(projections, geom, filter_name='ram-lak',
         # and the pixel steps, which on a circular orbit are the same for
         # every projection: compute it again only when they change (beyond
         # rounding: computed per view, they differ by about 1e-12).
-        key = np.array([pu[k], pv[k], sdd[k], uu[k], vv[k], uv[k]])
-        if cos_key is None or not (
+        key = None if parallel else \
+            np.array([pu[k], pv[k], sdd[k], uu[k], vv[k], uv[k]])
+        if key is not None and (cos_key is None or not (
                 np.all(np.abs(key[:2] - cos_key[:2]) < 1e-6) and
-                np.allclose(key[2:], cos_key[2:], rtol=1e-9, atol=0)):
+                np.allclose(key[2:], cos_key[2:], rtol=1e-9, atol=0))):
             # Squared distance of each pixel from the principal point:
             # |a U + b V|^2 = a^2 U.U + 2 a b U.V + b^2 V.V, from 1D
             # offsets a, b (separable, so no (v, u, 3) temporaries).
@@ -266,10 +258,13 @@ def preweight_and_filter(projections, geom, filter_name='ram-lak',
         # Sample spacing on the virtual detector through the axis; the
         # angular step and this spacing scale the whole projection, so
         # they join the per-column redundancy weight in one multiply.
-        tau = pitch_u[k] * sod[k] / sdd[k]
+        tau = pitch_u[k] if parallel else pitch_u[k] * sod[k] / sdd[k]
         column = (red[k] * (dbeta[k] / tau)).astype(np.float32)
-        row = proj[k] * cos_w
-        row *= column[None, :]
+        if parallel:
+            row = proj[k] * column[None, :]
+        else:
+            row = proj[k] * cos_w
+            row *= column[None, :]
         F = _fft.rfft(row, n=n_fft, axis=1, **_FFT_KW)
         F *= H
         out[k] = _fft.irfft(F, n=n_fft, axis=1, **_FFT_KW)[:, :geom.n_u]
