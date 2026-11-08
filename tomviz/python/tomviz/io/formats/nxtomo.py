@@ -42,8 +42,9 @@ _ANGLE = {'degree': 1.0, 'degrees': 1.0, 'deg': 1.0,
 def _text(value):
     if isinstance(value, bytes):
         return value.decode('utf-8', 'replace')
-    if isinstance(value, np.ndarray) and value.shape == ():
-        return _text(value[()])
+    # Diamond's GDA writes strings as one-element arrays.
+    if isinstance(value, np.ndarray) and value.size == 1:
+        return _text(value.ravel()[0])
     return str(value)
 
 
@@ -87,7 +88,13 @@ def _length_mm(dataset):
     scale = _LENGTH.get(units)
     if scale is None:
         return None
-    return float(np.ravel(dataset[()])[0]) * scale
+    try:
+        value = float(np.ravel(dataset[()])[0])
+    except (TypeError, ValueError):
+        # Placeholders occur: Diamond i13 files link x_pixel_size and
+        # distance to the scan's identifier string.
+        return None
+    return value * scale if np.isfinite(value) and value > 0 else None
 
 
 class NXtomoReader(Reader):
