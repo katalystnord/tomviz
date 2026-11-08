@@ -73,6 +73,30 @@ argument. Both keep a memory guard: the matrix grows with slice size,
 detector width and projections (about 4.5 GB for 512^2 slices from 720
 projections), and bigger problems go to the GPU path.
 
+## TomoPy
+
+TomoPy is not part of Tomviz's default install, but users may run it
+(Tomviz has a TomoPy Reconstruction operator). Measured with
+`dev/tomopy_compare.py`, TomoPy 1.15.3 from conda-forge in its own
+environment, on the same problem, 24 cores (its GPU mode needs CUDA, not
+available here). Errors are scored inside the reconstruction circle (95 %
+of the radius), where the detector covers every angle.
+
+| | SIRT per iteration | RMSE after 50 iterations (in the circle) |
+|---|---|---|
+| TomoPy SIRT, 24 cores | 2.2 to 2.7 s (two runs) | 0.057 |
+| Ours, RX 9070 | 0.031 s | 0.059 |
+| Ours, CPU, sparse matrix | 0.24 to 0.45 s | (0.049 over the whole volume, as above) |
+
+Same quality per iteration; TomoPy's SIRT is about 5x faster than
+upstream's SIRT, ours 70 to 90x faster than TomoPy's on this GPU and 5 to
+10x on the CPU. Our FBP: 0.15 s on the GPU, RMSE 0.021 in the circle.
+
+Not compared yet: TomoPy's gridrec and fbp. Run as I set them up they
+gave an offset and misplaced output on input where TomoPy's own SIRT is
+fine, which points at my setup (padding and centre conventions), not at
+gridrec; they stay out until set up properly.
+
 ## Generate Tilt Series
 
 | | 256^3, 180 tilts | Against upstream |
