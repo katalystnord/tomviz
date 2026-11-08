@@ -245,40 +245,58 @@ def axis_offset_from_opposite(source, angles, n_rows=16, max_pairs=12):
 
     The same method as the opposite-projections option of Tilt Axis Shift
     Alignment, on n_rows detector rows spread over the frame, read from
-    the source, so the scan is never loaded."""
+    the source, so the scan is never loaded. A view with no partner
+    exactly 180 degrees on, but one within an angular step (as in scans
+    over [0, 180) that stop one step short), is paired with the opposite
+    view interpolated, or extrapolated, from the two views nearest to
+    it."""
     angles = np.asarray(angles, dtype=np.float64).ravel()
     n_angles, n_v, n_u = source.shape
     if len(angles) != n_angles:
         raise RuntimeError('Every projection needs an angle')
     steps = np.diff(np.sort(angles))
     step = np.median(steps[steps > 0]) if np.any(steps > 0) else 1.0
-    tolerance = max(0.25 * step, 1e-3)
-    pairs = []
+    exact = max(0.25 * step, 1e-3)
+    pairs = []   # (i, j0, j1, w): view i against (1 - w) p[j0] + w p[j1]
     for i, a in enumerate(angles):
-        gap = np.abs(np.mod(angles - a, 360.0) - 180.0)
-        j = int(np.argmin(gap))
-        if gap[j] <= tolerance and i < j:
-            pairs.append((i, j))
+        # Signed angular distance of every view from a + 180, in (-180, 180]
+        d = np.mod(angles - a - 180.0 + 180.0, 360.0) - 180.0
+        order = np.argsort(np.abs(d))
+        j0 = int(order[0])
+        if abs(d[j0]) <= exact:
+            if i < j0:
+                pairs.append((i, j0, j0, 0.0))
+            continue
+        if abs(d[j0]) > 1.001 * step or i == j0:
+            continue
+        j1 = int(order[1])
+        if d[j1] == d[j0] or abs(d[j1]) > 2.001 * step:
+            continue
+        # target (distance 0) = d[j0] + w (d[j1] - d[j0])
+        w = -d[j0] / (d[j1] - d[j0])
+        if i < min(j0, j1) or not any(p[0] in (j0, j1) for p in pairs):
+            pairs.append((i, j0, j1, float(w)))
     if not pairs:
         raise RuntimeError(
-            'Finding the rotation axis needs projections 180 degrees apart '
-            '(scans over 180 degrees with both ends, or over 360); give '
-            'the axis offset instead')
+            'Finding the rotation axis needs projections 180 degrees apart, '
+            'or within one angular step of it (scans over 180 degrees, '
+            'or over 360); give the axis offset instead')
     pick = [pairs[k] for k in np.unique(np.linspace(
         0, len(pairs) - 1, min(max_pairs, len(pairs))).astype(int))]
     rows = np.unique(np.linspace(n_v * 0.1, n_v * 0.9 - 1,
                                  min(n_rows, n_v)).astype(int))
     # (n_angles, rows, n_u), only the projections of the chosen pairs kept
-    wanted = sorted({k for p in pick for k in p})
+    wanted = sorted({k for p in pick for k in p[:3]})
     band = np.concatenate([source.read_rows(r, r + 1)[wanted]
                            for r in rows], axis=1)
     where = {k: i for i, k in enumerate(wanted)}
     up = 16
     size = 2 * n_u * up
     offsets = []
-    for i, j in pick:
+    for i, j0, j1, w in pick:
         a = _edges_to_zero(band[where[i]])
-        b = _edges_to_zero(band[where[j]][:, ::-1])
+        opposite = (1 - w) * band[where[j0]] + w * band[where[j1]]
+        b = _edges_to_zero(opposite[:, ::-1])
         spectrum = (np.fft.rfft(a, 2 * n_u, axis=1) *
                     np.conj(np.fft.rfft(b, 2 * n_u, axis=1))).sum(axis=0)
         cc = np.fft.irfft(spectrum, size)

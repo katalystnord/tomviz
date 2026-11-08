@@ -285,3 +285,40 @@ def test_integer_counts_in_npy_and_raw(scan, tmp_path):
     vol = emd_volume(out)
     assert np.isfinite(vol).all()
     assert np.corrcoef(vol.ravel(), ref.ravel())[0, 1] > 0.99
+
+
+@pytest.mark.parametrize('angles,offset', [
+    (np.arange(0, 180.1, 1.0), 3.3),     # both ends: exact pairs
+    (np.arange(0, 180, 1.0), 3.3),       # one step short of 180
+    (np.arange(0, 180, 0.6), -7.6),
+    (np.arange(0, 360, 1.0), 5.2),
+])
+def test_axis_found_with_or_without_exact_opposite_views(angles, offset):
+    from tomviz.conebeam.scan import axis_offset_from_opposite
+    from tomviz.projectors import ParallelGeometry
+    phantom = EllipsoidPhantom.shepp_logan(radius=10.0)
+    g = ParallelGeometry.circular(angles, 0.25, 0.25, 128, 48,
+                                  offset_u=offset)
+    proj = phantom.project(g).astype(np.float32)
+
+    class Memory:
+        shape = proj.shape
+
+        def read_rows(self, r0, r1):
+            return proj[:, r0:r1]
+
+    assert axis_offset_from_opposite(Memory(), angles) == \
+        pytest.approx(offset, abs=0.1)
+
+
+def test_axis_needs_a_view_near_180_degrees_on():
+    from tomviz.conebeam.scan import axis_offset_from_opposite
+
+    class Memory:
+        shape = (140, 8, 32)
+
+        def read_rows(self, r0, r1):
+            return np.ones((140, r1 - r0, 32), np.float32)
+
+    with pytest.raises(RuntimeError, match='180 degrees apart'):
+        axis_offset_from_opposite(Memory(), np.arange(10, 150, 1.0))
