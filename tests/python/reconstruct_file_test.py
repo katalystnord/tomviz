@@ -346,3 +346,20 @@ def test_given_offset_used_when_the_axis_cannot_be_found(tmp_path):
     finally:
         builtins.print = real
     assert any('not found' in line and '+1.50' in line for line in printed)
+
+
+def test_paths_with_brackets_are_files_not_patterns(scan, tmp_path):
+    import h5py
+    import tifffile
+    _, counts, _ = scan
+    folder = tmp_path / 'run[3]'
+    folder.mkdir()
+    with h5py.File(folder / 'scan.h5', 'w') as f:
+        f['exchange/data'] = counts
+    assert open_scan(folder / 'scan.h5').shape == counts.shape
+    for k in range(3):
+        tifffile.imwrite(folder / f'p[{k}].tif', counts[k])
+    assert open_scan(folder).shape == (3,) + counts.shape[1:]
+    assert open_scan(folder / 'p[1].tif').shape == (1,) + counts.shape[1:]
+    # A pattern still works where no such file exists.
+    assert open_scan(str(tmp_path / 'run?3?' / '*.tif')).shape[0] == 3

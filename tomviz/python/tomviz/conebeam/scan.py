@@ -73,14 +73,20 @@ def _vendor(path):
                 kind=name)
 
 
+def _is_pattern(path):
+    """A glob pattern, not a file: * ? [ in a path that does not exist
+    (folders and files may have brackets in their names)."""
+    return not os.path.exists(path) and any(c in path for c in '*?[')
+
+
 def _tiff_files(path):
     if os.path.isdir(path):
-        files = sorted(f for f in glob.glob(os.path.join(path, '*'))
+        files = sorted(os.path.join(path, f) for f in os.listdir(path)
                        if f.lower().endswith(('.tif', '.tiff')))
         if not files:
             raise RuntimeError(f'{path}: no TIFF files in the folder')
         return files
-    if any(c in path for c in '*?['):
+    if _is_pattern(path):
         files = sorted(glob.glob(path))
         if not files:
             raise RuntimeError(f'{path}: no files match')
@@ -106,7 +112,7 @@ def open_scan(path, dataset=None, raw_shape=None, raw_dtype='float32',
         return scan
     low = path.lower()
     if os.path.isdir(path) or low.endswith(('.tif', '.tiff')) or \
-            any(c in path for c in '*?['):
+            _is_pattern(path):
         return Scan(FrameFiles(_tiff_files(path)), kind='TIFF frames')
     if low.endswith('.npy'):
         return Scan(RawStack.npy(path), kind='.npy stack')
