@@ -91,6 +91,7 @@ def test_data_exchange_with_flats_and_darks(scan, tmp_path):
         f['exchange/data_white'] = np.stack([I0 * gain + dark] * 3)
         f['exchange/data_dark'] = np.full((2,) + counts.shape[1:], dark,
                                           np.float32)
+        f['exchange/theta'] = np.arange(0, 360, 3.0)
     s = open_scan(path)
     assert s.kind == 'Data Exchange' and s.flat is not None
     out = tmp_path / 'vol.emd'
@@ -363,3 +364,24 @@ def test_paths_with_brackets_are_files_not_patterns(scan, tmp_path):
     assert open_scan(folder / 'p[1].tif').shape == (1,) + counts.shape[1:]
     # A pattern still works where no such file exists.
     assert open_scan(str(tmp_path / 'run?3?' / '*.tif')).shape[0] == 3
+
+
+def test_data_exchange_angles(tmp_path):
+    import h5py
+    data = np.zeros((6, 4, 5), np.float32)
+    with h5py.File(tmp_path / 'deg.h5', 'w') as f:
+        f['exchange/data'] = data
+        f['exchange/theta'] = np.arange(6) * 30.0
+    np.testing.assert_allclose(open_scan(tmp_path / 'deg.h5').angles,
+                               np.arange(6) * 30.0)
+    with h5py.File(tmp_path / 'rad.h5', 'w') as f:
+        f['exchange/data'] = data
+        f['exchange/theta'] = np.radians(np.arange(6) * 30.0)
+        f['exchange/theta'].attrs['units'] = 'rad'
+    np.testing.assert_allclose(open_scan(tmp_path / 'rad.h5').angles,
+                               np.arange(6) * 30.0)
+    with h5py.File(tmp_path / 'none.h5', 'w') as f:
+        f['exchange/data'] = data
+    # The format: evenly spaced over 180 degrees when theta is missing.
+    np.testing.assert_allclose(open_scan(tmp_path / 'none.h5').angles,
+                               np.arange(6) * 30.0)

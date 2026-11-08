@@ -125,6 +125,23 @@ def open_scan(path, dataset=None, raw_shape=None, raw_dtype='float32',
                 kind='raw frames')
 
 
+def _exchange_theta(f, n):
+    """Data Exchange projection angles in degrees. The format stores them
+    in degrees (units "deg"); a units attribute saying radians is honoured
+    all the same. Without /exchange/theta the format takes the
+    projections as evenly spaced over 180 degrees."""
+    if 'exchange/theta' not in f:
+        return np.arange(n) * (180.0 / n)
+    theta = f['exchange/theta']
+    units = theta.attrs.get('units', 'deg')
+    if isinstance(units, bytes):
+        units = units.decode('utf-8', 'replace')
+    values = np.asarray(theta[()], dtype=np.float64).ravel()
+    if str(units).strip().lower() in ('rad', 'radian', 'radians'):
+        values = np.degrees(values)
+    return values
+
+
 def _open_hdf5(path, dataset):
     import h5py
     if dataset:
@@ -134,8 +151,7 @@ def _open_hdf5(path, dataset):
             names = {k: f'exchange/{n}' for k, n in
                      (('data', 'data'), ('flat', 'data_white'),
                       ('dark', 'data_dark')) if f'exchange/{n}' in f}
-            angles = f['exchange/theta'][()] if 'exchange/theta' in f \
-                else None
+            angles = _exchange_theta(f, f['exchange/data'].shape[0])
             index = None
         else:
             try:
