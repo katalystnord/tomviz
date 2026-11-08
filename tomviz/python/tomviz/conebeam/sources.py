@@ -83,12 +83,13 @@ class FrameFiles:
         n_u = self.shape[2]
         file_dtype = self.dtype.newbyteorder(byteorder)
         buf = np.empty((r1 - r0, n_u), dtype=file_dtype)
-        fd = os.open(path, os.O_RDONLY)
+        from .stream import O_BINARY, read_at
+        fd = os.open(path, os.O_RDONLY | O_BINARY)
         try:
-            start = offset + r0 * n_u * file_dtype.itemsize
-            if os.preadv(fd, [memoryview(buf).cast('B')], start) != \
-                    buf.nbytes:
-                raise IOError(f'{path}: short read')
+            read_at(fd, memoryview(buf).cast('B'),
+                    offset + r0 * n_u * file_dtype.itemsize)
+        except IOError as e:
+            raise IOError(f'{path}: {e}') from e
         finally:
             os.close(fd)
         out[...] = buf

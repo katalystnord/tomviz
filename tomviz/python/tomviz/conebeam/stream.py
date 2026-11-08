@@ -19,6 +19,7 @@ The result is identical to the in-memory fdk(), up to float rounding.
 
 from concurrent.futures import ThreadPoolExecutor
 import os
+import threading
 
 import numpy as np
 
@@ -26,6 +27,47 @@ from tomviz.projectors.geometry import (ConeGeometry, ParallelGeometry,
                                         VolumeGeometry)
 
 from .filtering import preweight_and_filter
+
+# Windows opens files in text mode (newline translation) without O_BINARY.
+O_BINARY = getattr(os, 'O_BINARY', 0)
+_seek_lock = threading.Lock()
+
+
+def read_at(fd, view, offset):
+    """Fill view (a writable byte memoryview) from the file at offset.
+    Positioned reads release the GIL and leave the file position alone,
+    so threads can share a file: os.preadv (Linux, BSD), else os.pread
+    (other Unix, macOS), else a seek and read under a lock (Windows).
+    Partial reads are continued; only the end of the file stops it."""
+    done, size = 0, len(view)
+    while done < size:
+        if hasattr(os, 'preadv'):
+            got = os.preadv(fd, [view[done:]], offset + done)
+        else:
+            if hasattr(os, 'pread'):
+                data = os.pread(fd, size - done, offset + done)
+            else:
+                with _seek_lock:
+                    os.lseek(fd, offset + done, os.SEEK_SET)
+                    data = os.read(fd, size - done)
+            got = len(data)
+            view[done:done + got] = data
+        if got == 0:
+            raise IOError(f'unexpected end of file at byte {offset + done}')
+        done += got
+
+
+def write_at(fd, view, offset):
+    """Write view (a byte memoryview) to the file at offset, as read_at:
+    os.pwrite where it exists (Unix), else a seek and write under a lock."""
+    done = 0
+    while done < len(view):
+        if hasattr(os, 'pwrite'):
+            done += os.pwrite(fd, view[done:], offset + done)
+        else:
+            with _seek_lock:
+                os.lseek(fd, offset + done, os.SEEK_SET)
+                done += os.write(fd, view[done:])
 
 
 class RawStack:
@@ -42,7 +84,7 @@ class RawStack:
         self.offset = int(offset)
         flags = {'r': os.O_RDONLY, 'r+': os.O_RDWR,
                  'w': os.O_RDWR | os.O_CREAT}[mode]
-        self.fd = os.open(path, flags, 0o644)
+        self.fd = os.open(path, flags | O_BINARY, 0o644)
         self.transpose = None
         if mode == 'w':
             size = self.offset + int(np.prod(self.shape)) * \
@@ -66,14 +108,13 @@ class RawStack:
         rows = r1 - r0
         if out is None:
             out = np.empty((n, rows, n_u), dtype=self.dtype)
-        size = rows * n_u * self.dtype.itemsize
         for k in range(n):
             start = self.offset + ((k * n_v + r0) * n_u) * \
                 self.dtype.itemsize
-            view = memoryview(out[k]).cast('B')
-            got = os.preadv(self.fd, [view], start)
-            if got != size:
-                raise IOError(f'{self.path}: short read')
+            try:
+                read_at(self.fd, memoryview(out[k]).cast('B'), start)
+            except IOError as e:
+                raise IOError(f'{self.path}: {e}') from e
         return out
 
     def write_slab(self, z0, data):
@@ -83,10 +124,7 @@ class RawStack:
         data = np.ascontiguousarray(data, dtype=self.dtype)
         start = self.offset + z0 * int(np.prod(self.shape[1:])) * \
             self.dtype.itemsize
-        view = memoryview(data).cast('B')
-        done = 0
-        while done < len(view):
-            done += os.pwrite(self.fd, view[done:], start + done)
+        write_at(self.fd, memoryview(data).cast('B'), start)
 
 
 def create_emd(path, vol_geom, units='mm', name='FDK'):
