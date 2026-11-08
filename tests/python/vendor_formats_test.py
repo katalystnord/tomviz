@@ -309,6 +309,36 @@ def test_nxtomo_esrf_layout_radians_and_pixel_size(tmp_path):
     assert ds.metadata['nxtomo']['entry'] == 'entry0000'
 
 
+def test_nxtomo_as_diamond_gda_writes_it(tmp_path):
+    # As in a Diamond i13 file (mantidimaging-data, 24737.nxs): strings as
+    # one-element arrays, image_key as floats, angles without units, and
+    # the pixel size and distance linked to the scan's identifier string.
+    h5py = pytest.importorskip('h5py')
+    from tomviz.io.formats.nxtomo import NXtomoReader, is_nxtomo
+    keys = np.array([1.0, 2.0, 0.0, 0.0, 0.0])
+    data = np.stack([np.full((ROWS, COLS), i, np.uint16)
+                     for i in range(len(keys))])
+    path = tmp_path / 'gda.nxs'
+    with h5py.File(path, 'w') as f:
+        f['entry1/scan_identifier'] = np.array([b'a3d668c0-e3c4-4ed9'])
+        g = f.create_group('entry1/tomo_entry')
+        g.attrs['NX_class'] = b'NXsubentry'
+        g['definition'] = np.array([b'NXtomo'])
+        det = g.create_group('instrument/detector')
+        det['data'] = data
+        det['image_key'] = keys
+        for name in ('x_pixel_size', 'y_pixel_size', 'distance'):
+            det[name] = f['entry1/scan_identifier']
+        g['sample/rotation_angle'] = np.array([0, 0, -90.0, 0.0, 90.0])
+    assert is_nxtomo(str(path))
+    result = NXtomoReader().read(str(path))
+    ds = wrap(result)
+    assert ds.active_scalars.shape == (ROWS, COLS, 3)
+    np.testing.assert_allclose(ds.tilt_angles, [-90, 0, 90])
+    assert ds.metadata['nxtomo']['pixel_size_mm'] == [1.0, 1.0]
+    assert ds.metadata['nxtomo']['sample_detector_distance_mm'] is None
+
+
 def test_other_hdf5_is_not_nxtomo(tmp_path):
     h5py = pytest.importorskip('h5py')
     from tomviz.io.formats.nxtomo import is_nxtomo
