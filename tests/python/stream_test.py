@@ -147,3 +147,22 @@ def test_partial_reads_are_continued(tmp_path, monkeypatch):
     finally:
         os.close(fd)
     np.testing.assert_array_equal(out, data)
+
+
+def test_slabs_beyond_the_detector(scan, tmp_path):
+    # A volume much taller than the detector sees: its top and bottom
+    # slabs project off the detector and come out as zeros, as in memory.
+    g, _, proj = scan
+    vg = VolumeGeometry((90, 32, 32), 0.6)
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    src = RawStack.npy(str(tmp_path / 'proj.npy'))
+    out = RawStack(str(tmp_path / 'vol.raw'), vg.shape, mode='w')
+    fdk_stream(src, g, vg, out, backend='cpu', memory_bytes=400_000)
+    src.close()
+    out.close()
+    streamed = np.fromfile(tmp_path / 'vol.raw', np.float32).reshape(
+        vg.shape)
+    reference = fdk(proj, g, vg, backend='cpu')
+    np.testing.assert_allclose(streamed, reference,
+                               atol=1e-5 * np.abs(reference).max())
+    assert np.all(streamed[:5] == 0) and np.all(streamed[-5:] == 0)

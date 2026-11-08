@@ -199,9 +199,11 @@ def rows_for(geom, vol_geom, z0, z1, margin=2):
         raise RuntimeError('Part of the volume is behind the source; make '
                            'the volume smaller')
     v = h[:, :, 1] / h[:, :, 2]
-    r0 = int(np.clip(np.floor(v.min()) - margin, 0, geom.n_v))
-    r1 = int(np.clip(np.ceil(v.max()) + margin + 1, 0, geom.n_v))
-    return r0, max(r1, r0 + 1)
+    # Always a window inside the detector, even for slices that project
+    # off it (they then backproject nothing, as in memory).
+    r0 = int(np.clip(np.floor(v.min()) - margin, 0, geom.n_v - 1))
+    r1 = int(np.clip(np.ceil(v.max()) + margin + 1, r0 + 1, geom.n_v))
+    return r0, r1
 
 
 def default_memory_bytes(fraction=0.5, floor=1 << 30):
