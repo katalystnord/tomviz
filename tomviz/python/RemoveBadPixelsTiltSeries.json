@@ -1,18 +1,16 @@
 {
   "name": "RemoveBadPixelsTiltSeries",
   "label": "Remove Bad Pixels",
-  "description": "Replace bad pixels (zingers from stray radiation, hot and dead detector pixels) in every image by the median of their 3 x 3 neighbourhood. A pixel is bad when it differs from that median by more than the threshold, in units of the image's noise level.",
-  "externalCompatible": true,
+  "description": "Replace the bad pixels of each tilt image with the local median: a pixel is bad when it differs from the local median by more than the threshold times the standard deviation of its eight neighbors.",
   "parameters": [
     {
       "name": "threshold",
-      "label": "Threshold (noise standard deviations)",
-      "description": "How far from its neighbourhood median a pixel must be, in robust noise standard deviations, to be replaced. 5 leaves noise alone; lower values also catch weaker outliers but start to touch real fine detail.",
+      "label": "Threshold (local standard deviations)",
       "type": "double",
       "default": 5.0,
-      "minimum": 0.1,
-      "maximum": 1000.0,
-      "precision": 2
+      "minimum": 0.0
     }
-  ]
+  ],
+  "inputType": "ImageData",
+  "outputType": "ImageData"
 }

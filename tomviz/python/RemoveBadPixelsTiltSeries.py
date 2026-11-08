@@ -1,35 +1,32 @@
-def transform(dataset, threshold=5.0):
-    """Remove bad pixels (zingers, hot and dead pixels) in tilt series.
-
-    A pixel is bad when it differs from the median of its 3 x 3
-    neighbourhood by more than threshold times the image's noise level,
-    and is then replaced by that median. The noise level is a robust
-    standard deviation of those differences over the whole image (1.4826
-    x their median absolute value), so a spike cannot raise its own
-    yardstick the way the standard deviation of its own window does."""
+def transform(dataset, threshold=None):
+    """Remove bad pixels in tilt series."""
 
     import scipy.ndimage
     import numpy as np
-
-    if threshold is None or threshold <= 0:
-        raise RuntimeError('The threshold must be a positive number of '
-                           'noise standard deviations')
 
     tiltSeries = dataset.active_scalars.astype(np.float32)
 
     for i in range(tiltSeries.shape[2]):
         I = tiltSeries[:, :, i]
-        medianI = scipy.ndimage.median_filter(I, size=3, mode='nearest')
-        residual = I - medianI
-        sigma = 1.4826 * np.median(np.abs(residual))
-        if sigma == 0:
-            # Flat or quantised images: fall back to the plain spread.
-            sigma = residual.std()
-        if sigma == 0:
-            continue
+        I_pad = np.pad(I, (1, 1), 'edge')
 
-        # Identify and replace bad pixels
-        badPixelsMask = np.abs(residual) > threshold * sigma
+        # Standard deviation of the 8 neighbors in a 3 x 3 window, leaving
+        # out the pixel itself, which would inflate it when bad
+        averageI2 = (9 * scipy.ndimage.uniform_filter(I_pad ** 2) -
+                     I_pad ** 2) / 8
+        averageI = (9 * scipy.ndimage.uniform_filter(I_pad) - I_pad) / 8
+        std = np.sqrt(abs(averageI2 - averageI**2))[1:-1, 1:-1]
+        # Neighbors that agree (flat, quantized or sparse regions) have no
+        # deviation, so floor it at the typical nonzero one
+        nonzero = std[std > 0]
+        if nonzero.size:
+            std = np.maximum(std, np.median(nonzero))
+
+        medianI = scipy.ndimage.median_filter(I_pad, 2)[1:-1, 1:-1]
+
+        #identify bad pixels
+        badPixelsMask = abs(I - medianI) > std * threshold
+
         I[badPixelsMask] = medianI[badPixelsMask]
         tiltSeries[:, :, i] = I
 
