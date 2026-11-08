@@ -178,7 +178,9 @@ class LineIntegrals:
                              'level')
 
     def read_rows(self, r0, r1):
-        t = self.source.read_rows(r0, r1)
+        # Sources may return integer counts (RawStack keeps the file's
+        # dtype): corrected in float32, in place only on a float32 band.
+        t = np.asarray(self.source.read_rows(r0, r1), dtype=np.float32)
         dark = _as_band(self.dark, r0, r1)
         gain = _as_band(self.flat, r0, r1) - dark
         dead = gain <= 0

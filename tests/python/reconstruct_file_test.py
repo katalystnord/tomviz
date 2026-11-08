@@ -265,3 +265,23 @@ def test_parallel_beam_data_exchange_with_the_axis_found(tmp_path, method):
     # The axis is found to a few hundredths of a pixel, not exactly.
     rel = np.sqrt(np.mean((vol - expected) ** 2)) / np.abs(expected).max()
     assert rel < 0.01, rel
+
+
+def test_integer_counts_in_npy_and_raw(scan, tmp_path):
+    # RawStack returns the file's own dtype: uint16 counts must not be
+    # corrected in place (that raised a casting error).
+    g, counts, seen = scan
+    np.save(tmp_path / 'counts.npy', counts)
+    counts.tofile(tmp_path / 'counts.raw')
+    ref = reference(g, seen)
+    out = tmp_path / 'a.emd'
+    assert main([str(tmp_path / 'counts.npy'), str(out), '--i0', str(I0)] +
+                GEOMETRY) == 0
+    close(emd_volume(out), ref)
+    out = tmp_path / 'b.emd'
+    assert main([str(tmp_path / 'counts.raw'), str(out), '--raw-shape',
+                 *map(str, counts.shape), '--raw-dtype', 'uint16'] +
+                GEOMETRY) == 0   # open beam estimated from the counts
+    vol = emd_volume(out)
+    assert np.isfinite(vol).all()
+    assert np.corrcoef(vol.ravel(), ref.ravel())[0, 1] > 0.99
