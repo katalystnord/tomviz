@@ -322,3 +322,27 @@ def test_axis_needs_a_view_near_180_degrees_on():
 
     with pytest.raises(RuntimeError, match='180 degrees apart'):
         axis_offset_from_opposite(Memory(), np.arange(10, 150, 1.0))
+
+
+def test_given_offset_used_when_the_axis_cannot_be_found(tmp_path):
+    import builtins
+    import h5py
+    from tomviz.projectors import ParallelGeometry
+    phantom = EllipsoidPhantom.shepp_logan(radius=5.0)
+    angles = np.arange(10, 150, 2.0)      # no view near 180 degrees on
+    g = ParallelGeometry.circular(angles, 0.25, 0.25, 64, 24,
+                                  offset_u=1.5)
+    path = tmp_path / 'scan.h5'
+    with h5py.File(path, 'w') as f:
+        f['exchange/data'] = phantom.project(g).astype(np.float32)
+        f['exchange/theta'] = angles
+    printed = []
+    real = builtins.print
+    builtins.print = lambda *a, **k: printed.append(' '.join(map(str, a)))
+    try:
+        assert main([str(path), str(tmp_path / 'v.emd'), '--find-axis',
+                     '--offset-u', '1.5', '--intensity', 'none',
+                     '--pixel-size', '0.25', '--memory-gb', '0.0002']) == 0
+    finally:
+        builtins.print = real
+    assert any('not found' in line and '+1.50' in line for line in printed)

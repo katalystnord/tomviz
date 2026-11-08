@@ -172,7 +172,7 @@
     {
       "name": "offset_u",
       "label": "Horizontal Detector Offset (pixels)",
-      "description": "Where the central ray, through the rotation axis and perpendicular to the detector, hits the detector, in pixels from the detector centre across the rotation axis (along y). Use it to correct an off-centre rotation axis.",
+      "description": "Where the central ray, through the rotation axis and perpendicular to the detector, hits the detector, in pixels from the detector centre across the rotation axis (along y). Use it to correct an off-centre rotation axis. For parallel beams with Find the Rotation Axis on, this is used only when the axis cannot be found.",
       "type": "double",
       "default": 0.0,
       "precision": 3,
@@ -192,7 +192,7 @@
       "label": "Find the Rotation Axis (Parallel Beams)",
       "type": "bool",
       "default": true,
-      "description": "Find where the rotation axis projects from projections 180 degrees apart (the same method as Tilt Axis Shift Alignment's opposite projections), read from a few detector rows. Needs a scan over 180 degrees including both ends, or over 360. Off: use the Horizontal Detector Offset.",
+      "description": "Find where the rotation axis projects from projections 180 degrees apart (the same method as Tilt Axis Shift Alignment's opposite projections), read from a few detector rows. Needs a scan over 180 degrees (both ends, or one step short of the end) or over 360. When on, it replaces the Horizontal Detector Offset; when the axis cannot be found, that offset is used and the log says so.",
       "visible_if": "beam == 'parallel' or beam == 'auto'"
     },
     {
