@@ -166,3 +166,41 @@ def test_slabs_beyond_the_detector(scan, tmp_path):
     np.testing.assert_allclose(streamed, reference,
                                atol=1e-5 * np.abs(reference).max())
     assert np.all(streamed[:5] == 0) and np.all(streamed[-5:] == 0)
+
+
+@pytest.mark.parametrize('backend', ['cpu', 'gpu'])
+def test_cancel_and_progress_within_a_slab(scan, tmp_path, backend):
+    if backend == 'gpu':
+        pytest.importorskip('wgpu')
+        from tomviz.projectors.backend import get_backend
+        try:
+            backend = get_backend('gpu')
+        except RuntimeError as e:
+            pytest.skip(str(e))
+    g, vg, proj = scan
+    np.save(tmp_path / 'proj.npy', np.ascontiguousarray(proj, np.float32))
+    seen = []
+
+    def run(stop_after):
+        src = RawStack.npy(str(tmp_path / 'proj.npy'))
+        out = RawStack(str(tmp_path / 'vol.raw'), vg.shape, mode='w')
+        calls = []
+
+        def should_stop():
+            calls.append(1)
+            return len(calls) > stop_after
+        try:
+            # One slab: everything in memory.
+            return fdk_stream(src, g, vg, out, backend=backend,
+                              memory_bytes=1 << 30, progress=seen.append,
+                              should_stop=should_stop)
+        finally:
+            src.close()
+            out.close()
+
+    assert run(stop_after=10 ** 9) is not None
+    if backend == 'cpu':
+        # Progress inside the one slab (the GPU reports per dispatch, and
+        # this small volume is one dispatch).
+        assert any(0 < f < 1 for f in seen)
+    assert run(stop_after=2) is None      # stopped inside the slab

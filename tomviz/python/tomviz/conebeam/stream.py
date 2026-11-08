@@ -354,11 +354,21 @@ def fdk_stream(source, geom, vol_geom, target, filter_name='ram-lak',
             if i + 1 < len(slabs):
                 next_filtered = filterer.submit(filter_slab, i + 1)
 
+            def slab_progress(done, total, i=i):
+                if progress is not None:
+                    progress((i + done / max(total, 1)) / len(slabs))
+
+            # Cancel and progress within the slab too: slabs can hold
+            # hundreds of slices and take minutes.
             a = time.perf_counter()
             vol = be.backproject(filtered, crop_rows(geom, r0, r1),
-                                 slab_geometry(vol_geom, z0, z1))
+                                 slab_geometry(vol_geom, z0, z1),
+                                 progress=slab_progress,
+                                 should_stop=should_stop)
             t['backproject'] += time.perf_counter() - a
             del filtered
+            if vol is None:
+                return None
 
             a = time.perf_counter()
             if pending_write is not None:
